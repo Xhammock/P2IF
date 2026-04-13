@@ -1,0 +1,51 @@
+{
+  "seed": 42,
+  "data": {
+    "root": "data/weekday",
+    "feature_file": "features.csv",
+    "spatial_adj": "Spatial_Adjacency/adjacency_matrix.csv",
+    "spatial_ids": "Spatial_Adjacency/adjacency_ids.txt",
+    "od_matrix": "OD_Aajacency/Flow_matrix_weekday.csv",
+    "od_edgelist": null,
+    "top_k_od": null,
+    "use_street": false,
+    "dims": {
+      "poi": 155,
+      "res": 28,
+      "vis": 28,
+      "street": 0
+    }
+  },
+  "model": {
+    "model_type": "without_vis",
+    "hidden_dim": 256,
+    "sage_layers": 2,
+    "n_heads": 4,
+    "dropout": 0.1,
+    "proj_dim": 128,
+    "feat_drop_ratio": 0.1,
+    "edge_drop_ratio": 0.075,
+    "noise_std": 0.01,
+    "tau": 0.1,
+    "od_mask_topk": -1,
+    "use_poi": true,
+    "use_vis": false,
+    "use_street": false
+  },
+  "optim": {
+    "lr": 0.0001,
+    "weight_decay": 0.0,
+    "scheduler": {
+      "type": "CosineAnnealingLR",
+      "min_lr": 1e-06,
+      "step_size": 100,
+      "gamma": 0.5
+    }
+  },
+  "train": {
+    "epochs": 300,
+    "save_every": 10,
+    "patience": null,
+    "out_dir": "checkpoints"
+  }
+}
