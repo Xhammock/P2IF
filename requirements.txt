@@ -1,0 +1,17 @@
+# PyTorch: install a build that matches your CUDA (or CPU). Example:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu124
+# DGL: must match your torch/CUDA. Example:
+#   pip install dgl -f https://data.dgl.ai/wheels/cu124/repo.html
+torch>=2.0.0,<3.0.0
+dgl>=2.1.0,<2.5.0
+
+numpy>=1.24.0
+pandas>=2.0.0
+matplotlib>=3.7.0
+scipy>=1.10.0
+scikit-learn>=1.3.0
+lightgbm>=4.0.0
+tqdm>=4.65.0
+
+# Optional: UMAP plots in task/cluster_embeddings.py (skipped if import fails)
+umap-learn>=0.5.3
