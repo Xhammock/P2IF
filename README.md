@@ -23,7 +23,7 @@ This README follows a journal-style data and code sharing layout: **end-to-end d
 │   │   ├── spatial_sage.py
 │   │   └── projection_head.py
 │   └── nets/               # P2IF (UrbanModelAug), baselines, ablations
-├── task/                   # Downstream evaluation, clustering, k selection
+├── task/                   # Downstream evaluation, clustering, k selection, AIC
 ├── train_urban_unsup.py    # Main self-supervised training + embedding export
 └── README.md
 ```
@@ -37,6 +37,7 @@ This README follows a journal-style data and code sharing layout: **end-to-end d
 | Graph encoder / fusion | `model/nets/model_aug.py`, `spatial_sage.py` |
 | Training loop, checkpoints, `best_embeddings.npz` | `train_urban_unsup.py` |
 | Downstream regression / classification | `task/task_lightgbm.py`, `task/predict_landuse_mlp.py` |
+| In-sample AIC from downstream predictions | `task/aic_from_predictions_csv.py` |
 | Clustering & embedding visualization | `task/cluster_embeddings.py`, `task/find_optimal_k.py` |
 
 ---
@@ -153,6 +154,7 @@ Map each **paper artifact** to the following steps. Replace `RUN_DIR` with your 
 |-----------------|-------------------|---------------|------------------|--------|
 | **Table 2** (example: downstream regression) | RMSE / MAE / R² for house price | `best_embeddings.npz`, `data/house_price_aligned_grid.csv` | `python task/task_lightgbm.py --task house_price --embeddings ${RUN_DIR}/best_embeddings.npz --price_data data/house_price_aligned_grid.csv --embedding_key h --concat_keys h_spatial h_od` | `results/.../metrics`, predictions under `results/` |
 | **Table 3** (example: land use / vitality) | Accuracy / F1 / macro metrics | `best_embeddings.npz`, `data/landuse_aligned_grid.csv` or vitality CSV | `python task/task_lightgbm.py --task landuse --embeddings ${RUN_DIR}/best_embeddings.npz --landuse_data data/landuse_aligned_grid.csv` (or `--task vitality --vitality_data data/vitality_weekday_aggregated.csv`) | same as above |
+| **Table / metric: AIC** (example: compare downstream models) | In-sample AIC on regression tasks | `train_predictions.csv` (+ optional `lightgbm_model.txt`) from each `task_lightgbm.py` run | `python task/aic_from_predictions_csv.py --csv results/<checkpoint>/<task>_prediction/train_predictions.csv --k-from-lightgbm-trees results/<checkpoint>/<task>_prediction/lightgbm_model.txt --label "<model name>"` (see Section 6.2) | AIC printed to stdout; repeat per representation |
 | **Figure 2** (example: loss / training dynamics) | Training loss curve | Produced during training | Use `RUN_DIR/loss_curve.png` or replot `loss_curve.csv` | PNG / PDF for manuscript |
 | **Figure 3** (example: embedding 2D) | PCA / t-SNE / UMAP of `z` | `best_embeddings.npz` | `python task/cluster_embeddings.py --embeddings ${RUN_DIR}/best_embeddings.npz --embedding_key z --num_clusters <K> --output_dir ${RUN_DIR}/cluster_results --viz_methods pca tsne` | figures under `${RUN_DIR}/cluster_results/` |
 | **Figure 4** (example: optimal K) | Elbow / silhouette vs. k | `best_embeddings.npz` | `python task/find_optimal_k.py --embeddings ${RUN_DIR}/best_embeddings.npz --embedding_key z --k_min 2 --k_max 20 --output_dir ${RUN_DIR}/k_selection` | plots + CSV in `${RUN_DIR}/k_selection/` |
@@ -177,6 +179,74 @@ python train_urban_unsup.py --config config/model_Region2Vec.json --gpu 0
 ```
 
 Each run produces its own `RUN_DIR`; point downstream commands to the matching `best_embeddings.npz`.
+
+### 6.2 Model comparison via AIC (Akaike Information Criterion)
+
+Reviewers may ask for **AIC** values to compare downstream predictors fitted on different place representations (P2IF vs. baselines). This repository provides a standalone script that computes **Gaussian-regression AIC** from saved prediction CSVs produced by `task/task_lightgbm.py`.
+
+**Formula (same as used in our analysis pipeline):**
+
+\[
+\mathrm{AIC} = n \ln\!\left(\frac{\mathrm{RSS}}{n}\right) + 2k
+\]
+
+where \(n\) is the sample size, \(\mathrm{RSS} = \sum_i (y_i - \hat{y}_i)^2\) is the residual sum of squares, and \(k\) is the effective parameter count used in the penalty term.
+
+**Important conventions**
+
+| Item | Requirement |
+|------|-------------|
+| Input CSV | Must contain **`y_true`** and **`y_pred`** columns (defaults; override with `--y-true-col` / `--y-pred-col` if needed). |
+| Which predictions | Use **`train_predictions.csv`** — predictions on the **training split used to fit the downstream model** (in-sample AIC). Do **not** substitute `test_predictions.csv` unless you deliberately report a different analysis and interpret it accordingly. |
+| Regression tasks only | AIC here applies to **house price** and **vitality** runs from `task_lightgbm.py`. Classification tasks are out of scope for this script. |
+| Where files live | After a downstream run, outputs are under `results/<checkpoint_name>/<task>/`, e.g. `results/train_20260101_120000/vitality_prediction/train_predictions.csv` and `lightgbm_model.txt`. |
+
+**Choosing \(k\)**
+
+- **Linear models:** set \(k\) to the number of estimated coefficients **including the intercept** (e.g. embedding dimension after PCA plus one). Pass it explicitly with `--k`.
+- **LightGBM (default downstream head):** there is no single textbook parameter count. This script supports:
+  - **`--k <int>`** — you declare \(k\) in the manuscript (recommended when comparing methods under a fixed reporting rule); or
+  - **`--k-from-lightgbm-trees <model.txt>`** — count `Tree=` blocks in the exported LightGBM text model as a **heuristic** complexity proxy. This is **not** a strict parameter count; interpret cross-method comparisons (e.g. LightGBM vs. linear regression) with care.
+
+**Workflow: compare AIC across representation models**
+
+1. Train each representation (Section 5 / Section 6.1) and note its `RUN_DIR`.
+2. For each representation, run the **same downstream task** (same `--task`, splits, and LightGBM settings), e.g. vitality regression:
+
+   ```bash
+   python task/task_lightgbm.py \
+     --task vitality \
+     --embeddings ${RUN_DIR}/best_embeddings.npz \
+     --vitality_data data/vitality_weekday_aggregated.csv \
+     --embedding_key h \
+     --concat_keys h_spatial h_od
+   ```
+
+   Repeat with `${RUN_DIR}` pointing to P2IF and each baseline checkpoint. Each run writes `train_predictions.csv` and `lightgbm_model.txt` under `results/<checkpoint_name>/vitality_prediction/` (or `house_price_prediction/`).
+
+3. Compute AIC per run with `task/aic_from_predictions_csv.py`:
+
+   **LightGBM — tree-count heuristic for \(k\):**
+
+   ```bash
+   python task/aic_from_predictions_csv.py \
+     --csv results/train_20260101_120000/vitality_prediction/train_predictions.csv \
+     --k-from-lightgbm-trees results/train_20260101_120000/vitality_prediction/lightgbm_model.txt \
+     --label "P2IF + LightGBM"
+   ```
+
+   **User-specified \(k\) (e.g. linear baseline or a fixed reporting rule):**
+
+   ```bash
+   python task/aic_from_predictions_csv.py \
+     --csv results/train_20260101_120000/vitality_prediction/train_predictions.csv \
+     --k 129 \
+     --label "P2IF + linear (128 PCA dims + intercept)"
+   ```
+
+4. Compare the printed **AIC** values across `--label` tags. Lower AIC indicates a better trade-off between fit and complexity **under the stated \(k\) definition**.
+
+The script prints \(n\), RSS, \(\widehat{\sigma^2} = \mathrm{RSS}/n\), the \(k\) source, and the final AIC. When using `--k-from-lightgbm-trees`, a short caution is also written to stderr about heuristic \(k\).
 
 ---
 
