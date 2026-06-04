@@ -29,11 +29,11 @@ class FeedForward(nn.Module):
 
 class UrbanModelAugWithoutInteraction(nn.Module):
     """
-    消融实验变体：W/o Interaction（去除分模态交互机制）。
+    Ablation variant: W/o Interaction (removes per-modality interaction).
 
-    - 空间层：GraphSAGE（与主模型一致）
-    - 交互层：将所有模态映射到同一融合空间（fused），使用 ODCrossAttentionUnified 做一次统一注意力融合
-    - 训练：保留视图增强与 Spatial-aware NT-Xent（与主模型一致）
+    - Spatial layer: GraphSAGE (same as main model)
+    - Interaction layer: map all modalities to fused space, single ODCrossAttentionUnified pass
+    - Training: view augmentation and Spatial-aware NT-Xent (same as main model)
     """
 
     def __init__(
@@ -87,7 +87,7 @@ class UrbanModelAugWithoutInteraction(nn.Module):
 
         self.spatial = SpatialSAGE(in_dim, hidden_dim, num_layers=sage_layers, dropout=dropout)
 
-        # Query 仍使用 res 子空间（与主模型一致）
+        # Query still uses res subspace (same as main model)
         self.q_dim = dims["res"]
         self.poi_dim = actual_poi_dim
         self.vis_dim = actual_vis_dim

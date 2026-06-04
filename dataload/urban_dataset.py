@@ -23,7 +23,8 @@ def _standardize(arr: np.ndarray, eps: float = 1e-6) -> np.ndarray:
 
 class UrbanWeekdayDataset(data.Dataset):
     """
-    单图数据集：包含空间邻接图与 OD 功能图，以及节点多模态特征。
+    Single-graph dataset with spatial adjacency and OD functional graphs,
+    plus multi-modal node features.
     """
 
     def __init__(
@@ -31,7 +32,7 @@ class UrbanWeekdayDataset(data.Dataset):
         data_root: str = "data/weekday",
         feature_file: str = "features_normalized_weekday.csv",
         spatial_adj: str = "Spatial_Adjacency/adjacency_matrix.csv",
-        spatial_ids: str = "Spatial_Adjacency/adjacency_ids.txt",
+        spatial_ids: str = "Spatial_Ajacency/adjacency_ids.txt",
         od_matrix: str = "OD_Aajacency/Flow_matrix_weekday.csv",
         od_edgelist: Optional[str] = None,
         top_k_od: Optional[int] = None,
@@ -70,7 +71,9 @@ class UrbanWeekdayDataset(data.Dataset):
     def _load_features(self, feature_path: str) -> torch.Tensor:
         df = pd.read_csv(feature_path)
         node_ids = df.iloc[:, 0].astype(int).tolist()
-        assert node_ids == self.node_ids, "feature 节点顺序与 adjacency_ids 不一致"
+        assert node_ids == self.node_ids, (
+            "Feature node order does not match adjacency_ids"
+        )
 
         poi_dim = self.dims["poi"]
         res_dim = self.dims["res"]
@@ -99,7 +102,7 @@ class UrbanWeekdayDataset(data.Dataset):
         return torch.from_numpy(feats)
 
     def _build_spatial_graph(self, adj_path: str) -> dgl.DGLGraph:
-        # CSV 第一列是节点 id，跳过首列只读邻接矩阵数值
+        # First CSV column is node id; skip it and read adjacency values only
         adj = np.loadtxt(
             adj_path,
             delimiter=",",
@@ -107,10 +110,10 @@ class UrbanWeekdayDataset(data.Dataset):
             usecols=range(1, len(self.node_ids) + 1),
         )
         assert adj.shape[0] == adj.shape[1] == len(
-            self.node_ids), "空间邻接矩阵尺寸不匹配"
+            self.node_ids), "Spatial adjacency matrix size mismatch"
 
         src, dst = np.nonzero(adj > 0)
-        # 构建无向图：补齐反向边
+        # Build undirected graph: add reverse edges
         src_all = np.concatenate([src, dst])
         dst_all = np.concatenate([dst, src])
 
@@ -120,17 +123,17 @@ class UrbanWeekdayDataset(data.Dataset):
 
     def _build_od_graph(self, matrix_path: str, edge_path: Optional[str]) -> dgl.DGLGraph:
         if edge_path and os.path.exists(edge_path):
-            # 三列格式：src_id, dst_id, weight
+            # Three-column format: src_id, dst_id, weight
             edge_df = pd.read_csv(edge_path)
-            assert edge_df.shape[1] >= 3, "od edge list 需要三列"
+            assert edge_df.shape[1] >= 3, "OD edge list must have three columns"
             src_ids = edge_df.iloc[:, 0].astype(int).to_numpy()
             dst_ids = edge_df.iloc[:, 1].astype(int).to_numpy()
             weights = edge_df.iloc[:, 2].to_numpy(dtype=np.float32)
         else:
-            # OD 矩阵文件没有额外的 id 行/列，直接读取全部数值
+            # OD matrix has no extra id row/column; read all numeric values
             mat = np.loadtxt(matrix_path, delimiter=",", skiprows=0)
             assert mat.shape[0] == mat.shape[1] == len(
-                self.node_ids), "OD 矩阵尺寸不匹配"
+                self.node_ids), "OD matrix size mismatch"
             weights = []
             src_ids = []
             dst_ids = []
@@ -142,33 +145,33 @@ class UrbanWeekdayDataset(data.Dataset):
                         row[nz_idx], -self.top_k_od)[-self.top_k_od:]
                     nz_idx = nz_idx[topk_idx]
                 for j in nz_idx:
-                    src_ids.append(self.node_ids[j])  # 目标 j
-                    dst_ids.append(self.node_ids[i])  # 源 i
+                    src_ids.append(self.node_ids[j])  # destination j
+                    dst_ids.append(self.node_ids[i])  # source i
                     weights.append(row[j])
 
             src_ids = np.array(src_ids, dtype=int)
             dst_ids = np.array(dst_ids, dtype=int)
             weights = np.array(weights, dtype=np.float32)
 
-        # 将节点 id 映射为索引，并反向存边：dst=源，src=目的地，方便在 dst 聚合
+        # Map node ids to indices; store edges reversed (dst=source, src=destination) for aggregation at dst
         src_idx = np.vectorize(self.id_to_idx.get)(src_ids)
         dst_idx = np.vectorize(self.id_to_idx.get)(dst_ids)
 
-        # 保存原始权重（用于 Region2Vec loss）
+        # Keep raw weights (for Region2Vec loss)
         raw_weights = np.array(weights, dtype=np.float32)
         norm_weights = _standardize(np.log1p(weights))
 
         g = dgl.graph((src_idx, dst_idx), num_nodes=len(self.node_ids))
         g.ndata["feat"] = self.features.clone()
         g.edata["flow"] = torch.from_numpy(norm_weights).unsqueeze(-1).float()
-        g.edata["flow_raw"] = torch.from_numpy(raw_weights).unsqueeze(-1).float()  # 原始 flow 值
+        g.edata["flow_raw"] = torch.from_numpy(raw_weights).unsqueeze(-1).float()  # raw flow values
         return g
 
     def __len__(self) -> int:
         return 1
 
     def __getitem__(self, idx: int):
-        # 单图任务直接返回两张图与特征
+        # Single-graph task: return both graphs and features
         return {
             "g_spatial": self.g_spatial,
             "g_od": self.g_od,

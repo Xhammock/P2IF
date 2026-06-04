@@ -31,8 +31,8 @@ class FeedForward(nn.Module):
 
 class ODGAT(nn.Module):
     """
-    基于 OD 图的传统 GAT 层
-    使用 DGL 的 GATConv
+    Traditional GAT layer on the OD graph.
+    Uses DGL GATConv.
     """
 
     def __init__(
@@ -44,7 +44,7 @@ class ODGAT(nn.Module):
         dropout: float = 0.0,
     ):
         super().__init__()
-        assert hidden_dim % num_heads == 0, "hidden_dim 必须能被 num_heads 整除"
+        assert hidden_dim % num_heads == 0, "hidden_dim must be divisible by num_heads"
         self.num_layers = num_layers
         self.num_heads = num_heads
         self.head_dim = hidden_dim // num_heads
@@ -74,24 +74,24 @@ class ODGAT(nn.Module):
     ) -> torch.Tensor:
         """
         Args:
-            g: OD 图
-            feats: [N, in_dim] 节点特征
-            edge_weight: [E, 1] 边权重（flow），可选（当前版本未使用，保留接口兼容性）
+            g: OD graph
+            feats: [N, in_dim] node features
+            edge_weight: [E, 1] edge weights (flow), optional (unused in this version; kept for API compatibility)
         Returns:
-            h: [N, hidden_dim] 输出特征
+            h: [N, hidden_dim] output features
         """
         h = feats
 
         for i, layer in enumerate(self.layers):
-            # GATConv 返回 [N, num_heads, head_dim]
+            # GATConv returns [N, num_heads, head_dim]
             h = layer(g, h)
-            # 如果不是最后一层，需要reshape以便下一层使用
+            # Reshape for the next layer unless this is the last layer
             if i < len(self.layers) - 1:
-                # 中间层：reshape 为 [N, hidden_dim]
+                # Intermediate layer: reshape to [N, hidden_dim]
                 h = h.reshape(h.shape[0], -1)
                 h = self.dropout(h)
             else:
-                # 最后一层：reshape 为 [N, hidden_dim]
+                # Last layer: reshape to [N, hidden_dim]
                 h = h.reshape(h.shape[0], -1)
 
         return h
@@ -99,9 +99,9 @@ class ODGAT(nn.Module):
 
 class UrbanModelGAT(nn.Module):
     """
-    两级结构：空间 GraphSAGE + OD GAT + 投影头
-    使用视图增强的对比学习（Spatial-aware NT-Xent）
-    OD层使用传统GAT而非Transformer注意力
+    Two-stage architecture: spatial GraphSAGE + OD GAT + projection head.
+    Uses view-augmented contrastive learning (Spatial-aware NT-Xent).
+    OD layer uses traditional GAT instead of Transformer attention.
     """
 
     def __init__(
@@ -114,15 +114,15 @@ class UrbanModelGAT(nn.Module):
         dropout: float = 0.1,
         proj_dim: int = 128,
         loss_weight: Dict[str, float] | None = None,
-        # 视图增强参数
+        # View augmentation parameters
         feat_drop_ratio: float = 0.1,
         edge_drop_ratio: float = 0.075,
         noise_std: float = 0.01,
         tau: float = 0.1,  # NT-Xent temperature
-        # Spatial-aware NT-Xent：额外屏蔽 OD 强邻居
-        # od_mask_topk == -1: 屏蔽所有有流量的节点对（flow > 0）
-        # od_mask_topk > 0: 屏蔽每个节点流量最大的 top-k 个邻居
-        # od_mask_topk <= 0 (且 != -1): 不屏蔽OD邻居
+        # Spatial-aware NT-Xent: additionally mask strong OD neighbors
+        # od_mask_topk == -1: mask all node pairs with flow > 0
+        # od_mask_topk > 0: mask top-k neighbors by flow per node
+        # od_mask_topk <= 0 (and != -1): do not mask OD neighbors
         od_mask_topk: int = 200,
     ):
         super().__init__()
@@ -130,14 +130,14 @@ class UrbanModelGAT(nn.Module):
         in_dim = dims["poi"] + dims["res"] + \
             dims["vis"] + dims.get("street", 0)
 
-        # 视图增强参数
+        # View augmentation parameters
         self.tau = tau
         self.feat_drop_ratio = feat_drop_ratio
         self.edge_drop_ratio = edge_drop_ratio
         self.noise_std = noise_std
         self.od_mask_topk = int(od_mask_topk)
 
-        # Spatial-aware NT-Xent：缓存"允许作为负样本"的mask
+        # Spatial-aware NT-Xent: cache mask of pairs allowed as negatives
         self._spatial_allow_mask: torch.Tensor | None = None
         self._spatial_allow_mask_num_nodes: int | None = None
         self._spatial_allow_mask_num_edges: int | None = None
@@ -147,11 +147,11 @@ class UrbanModelGAT(nn.Module):
         self._od_allow_mask_num_nodes: int | None = None
         self._od_allow_mask_num_edges: int | None = None
 
-        # 空间编码器
+        # Spatial encoder
         self.spatial = SpatialSAGE(
             in_dim, hidden_dim, num_layers=sage_layers, dropout=dropout)
 
-        # OD层：使用传统GAT
+        # OD layer: traditional GAT
         self.od_gat = ODGAT(
             in_dim=hidden_dim,
             hidden_dim=hidden_dim,
@@ -166,13 +166,13 @@ class UrbanModelGAT(nn.Module):
         self.proj = ProjectionHead(hidden_dim, hidden_dim, proj_dim)
 
     def forward(self, batch: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, Dict]:
-        # 生成两个增强视图
+        # Build two augmented views
         view1_spatial, view1_od, view1_feat = self._create_view1(
             batch["g_spatial"], batch["g_od"], batch["feat"])
         view2_spatial, view2_od, view2_feat = self._create_view2(
             batch["g_spatial"], batch["g_od"], batch["feat"])
 
-        # 对两个视图分别编码
+        # Encode each view separately
         batch_v1 = {"g_spatial": view1_spatial,
                     "g_od": view1_od, "feat": view1_feat}
         batch_v2 = {"g_spatial": view2_spatial,
@@ -180,15 +180,15 @@ class UrbanModelGAT(nn.Module):
         h_spatial_v1, h_od_v1, z_v1 = self._encode(batch_v1)
         h_spatial_v2, h_od_v2, z_v2 = self._encode(batch_v2)
 
-        # Spatial-aware NT-Xent：使用"原始空间图/OD图"构建mask
+        # Spatial-aware NT-Xent: build mask from original spatial/OD graphs
         self._ensure_spatial_allow_mask(
             batch["g_spatial"], device=z_v1.device)
         self._ensure_od_allow_mask(batch["g_od"], device=z_v1.device)
 
-        # 计算对比损失
+        # Contrastive loss
         loss, info = self._contrastive_loss(z_v1, z_v2)
 
-        # 使用v1的编码作为主要输出
+        # Use view-1 encoding as primary output
         info.update({
             "h_spatial": h_spatial_v1,
             "h_od": h_od_v1,
@@ -198,9 +198,9 @@ class UrbanModelGAT(nn.Module):
 
     def encode(self, batch: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        返回空间层输出、OD 层输出以及最终投影后的表征 z（已 L2 归一化）。
-        用于推理/可视化，外部需保证 no_grad。
-        推理时不使用数据增强。
+        Return spatial output, OD output, and L2-normalized projection z.
+        For inference/visualization; caller should use no_grad.
+        No data augmentation at inference time.
         """
         h_spatial, h_od, z = self._encode(batch)
         return h_spatial, h_od, z
@@ -215,8 +215,8 @@ class UrbanModelGAT(nn.Module):
         h_spatial = self.spatial(g_spatial, feats)
         h_spatial = self.ffn_spatial(h_spatial)
 
-        # OD层：使用传统GAT
-        # 获取边权重（flow）
+        # OD layer: traditional GAT
+        # Edge weights (flow)
         edge_flow = g_od.edata.get("flow", None)
         if edge_flow is not None:
             edge_flow = edge_flow.to(device)
@@ -230,7 +230,7 @@ class UrbanModelGAT(nn.Module):
 
     def _create_view1(self, g_spatial, g_od, feats: torch.Tensor) -> Tuple:
         """
-        视图1：特征dropout + 高斯噪声
+        View 1: feature dropout + Gaussian noise.
         """
         if self.training and self.feat_drop_ratio > 0:
             feat_mask = torch.rand(
@@ -251,7 +251,7 @@ class UrbanModelGAT(nn.Module):
 
     def _create_view2(self, g_spatial, g_od, feats: torch.Tensor) -> Tuple:
         """
-        视图2：dropedge + 高斯噪声
+        View 2: drop-edge + Gaussian noise.
         """
         view2_feat = feats
         if self.training and self.noise_std > 0:
@@ -266,7 +266,7 @@ class UrbanModelGAT(nn.Module):
 
     def _drop_edges(self, g, drop_ratio: float):
         """
-        随机删除图中一定比例的边
+        Randomly drop a fraction of edges in the graph.
         """
         if not self.training or drop_ratio <= 0:
             return g.clone()
@@ -295,7 +295,7 @@ class UrbanModelGAT(nn.Module):
 
     def _ensure_spatial_allow_mask(self, g_spatial, device: torch.device) -> None:
         """
-        构建/更新空间非邻居mask
+        Build or update spatial non-neighbor allow mask.
         """
         num_nodes = g_spatial.num_nodes()
         num_edges = g_spatial.num_edges()
@@ -326,12 +326,12 @@ class UrbanModelGAT(nn.Module):
 
     def _ensure_od_allow_mask(self, g_od, device: torch.device) -> None:
         """
-        构建/更新 OD 非邻居mask
-        定义 OD 邻居：
-        - 如果 od_mask_topk == -1：屏蔽所有有流量的节点对（flow > 0）
-        - 如果 od_mask_topk > 0：对每个节点 i，从与 i 相连的 OD 边（忽略方向）中，
-          选择 flow 最大的 top-k 个邻居节点作为"OD 邻居"（不作为负样本）。
-        - 如果 od_mask_topk <= 0（且 != -1）：不屏蔽OD邻居
+        Build or update OD non-neighbor allow mask.
+        OD neighbors are defined as:
+        - If od_mask_topk == -1: mask all node pairs with flow > 0
+        - If od_mask_topk > 0: for each node i, among OD edges incident to i (undirected),
+          take the top-k neighbors by flow as OD neighbors (excluded from negatives).
+        - If od_mask_topk <= 0 (and != -1): do not mask OD neighbors
         """
         num_nodes = g_od.num_nodes()
         num_edges = g_od.num_edges()
@@ -366,13 +366,13 @@ class UrbanModelGAT(nn.Module):
         neighbor_mask = torch.zeros(
             (num_nodes, num_nodes), device=device, dtype=torch.bool)
 
-        # od_mask_topk == -1：屏蔽所有有流量的节点对
+        # od_mask_topk == -1: mask all pairs with positive flow
         if self.od_mask_topk == -1:
-            # 直接标记所有有边的节点对
+            # Mark all connected pairs
             neighbor_mask[src, dst] = True
-            neighbor_mask[dst, src] = True  # 无向图
+            neighbor_mask[dst, src] = True  # undirected
         else:
-            # 逐节点分段取 top-k
+            # Per-node segmented top-k
             u = torch.cat([src, dst], dim=0)
             v = torch.cat([dst, src], dim=0)
             w = torch.cat([flow, flow], dim=0)
@@ -418,7 +418,7 @@ class UrbanModelGAT(nn.Module):
 
     def _contrastive_loss(self, z1: torch.Tensor, z2: torch.Tensor) -> Tuple[torch.Tensor, Dict]:
         """
-        基于视图增强的对比损失
+        View-augmented contrastive loss.
         """
         allow_mask = None
         if self._spatial_allow_mask is not None and self._od_allow_mask is not None:

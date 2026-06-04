@@ -10,11 +10,12 @@ from model.layers.projection_head import ProjectionHead
 
 class UrbanModelReMVC(nn.Module):
     """
-    ReMVC baseline（对齐当前工程数据接口的实现版本）：
-    - POI view：基于空间邻接图 g_spatial 编码 POI 特征得到 z_poi
-    - Flow view：基于 OD 图 g_od 编码全特征（画像+poi+street）得到 z_flow（以流动交互结构作为“视图”）
-    - 训练目标：跨视图对比（InfoNCE / NT-Xent），节点 i 在两视图中互为正样本
-    - 输出嵌入：concat(z_flow, z_poi) 作为下游统一预测器输入
+    ReMVC baseline (implementation aligned with this repository's data interface):
+    - POI view: encode POI features on the spatial adjacency graph g_spatial -> z_poi
+    - Flow view: encode full features (profiles + POI + street) on OD graph g_od -> z_flow
+    - Training objective: cross-view contrastive learning (InfoNCE / NT-Xent); node i is a
+      positive pair across the two views
+    - Output embedding: concat(z_flow, z_poi) as input to downstream predictors
     """
 
     def __init__(
@@ -38,7 +39,7 @@ class UrbanModelReMVC(nn.Module):
 
         self.full_in_dim = self.poi_dim + self.res_dim + self.vis_dim + self.street_dim
 
-        # POI view：仅使用 poi 子向量作为输入
+        # POI view: POI sub-vector only
         self.poi_encoder = SpatialSAGE(
             in_dim=self.poi_dim,
             hidden_dim=hidden_dim,
@@ -47,7 +48,7 @@ class UrbanModelReMVC(nn.Module):
         )
         self.poi_proj = ProjectionHead(hidden_dim, hidden_dim, proj_dim)
 
-        # Flow view：使用全特征作为输入，在 OD 图上做聚合
+        # Flow view: full features aggregated on the OD graph
         self.flow_encoder = SpatialSAGE(
             in_dim=self.full_in_dim,
             hidden_dim=hidden_dim,
@@ -68,7 +69,7 @@ class UrbanModelReMVC(nn.Module):
 
         poi_feats = feats[:, : self.poi_dim]
 
-        # 若 use_street=False，截断掉末尾 street 维度，确保与 full_in_dim 对齐
+        # When use_street=False, drop trailing street dims so feats align with full_in_dim
         if self.street_dim == 0 and "street" in self.dims and int(self.dims.get("street", 0)) > 0:
             feats_full = feats[:, : self.poi_dim + self.res_dim + self.vis_dim]
         else:
@@ -94,4 +95,3 @@ class UrbanModelReMVC(nn.Module):
         loss_ab = F.cross_entropy(logits_ab, labels)
         loss_ba = F.cross_entropy(logits_ab.t(), labels)
         return 0.5 * (loss_ab + loss_ba)
-

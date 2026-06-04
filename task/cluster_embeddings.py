@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-使用 K-Means 对融合后的节点嵌入进行聚类，并提供多种 (PCA / t-SNE / UMAP)
-可视化方式，同时输出 node_id 对 cluster_id 的 CSV 映射。
+Cluster fused node embeddings with K-Means (or hierarchical clustering) and
+visualize with PCA / t-SNE / UMAP. Outputs a CSV mapping node_id to cluster_id.
 
-示例：
+Example:
     python cluster_embeddings.py \
         --embeddings checkpoints/train_20251202_200939/fused_embeddings.npz \
         --num_clusters 8 \
@@ -28,39 +28,39 @@ from scipy.spatial.distance import pdist
 
 try:
     import umap
-except ImportError:  # pragma: no cover - 仅在缺少依赖时触发
+except ImportError:  # pragma: no cover - only when dependency is missing
     umap = None
 
-# ========== 配置区域：可直接在此修改默认值 ==========
-# 如果不想通过命令行传参，可以直接修改下面的配置
+# ========== Configuration: edit defaults here ==========
+# If you prefer not to use the CLI, change the values below directly.
 DEFAULT_CONFIG = {
-    'embeddings': 'checkpoints/train_20251222_220544/best_embeddings.npz',  # 嵌入文件路径
-    # 使用的嵌入key: 'h_spatial', 'h_od', 'z', 或 'h'/'concat'（拼接模式）
+    'embeddings': 'checkpoints/train_20251222_220544/best_embeddings.npz',  # Path to embeddings file
+    # Embedding key: 'h_spatial', 'h_od', 'z', or 'h'/'concat' (concatenation mode)
     'embedding_key': 'z',
-    'concat_keys': ['h_spatial', 'h_od'],  # 当 embedding_key='h' 时，用于拼接的key列表
-    'clustering_method': 'hierarchical',  # 聚类方法: 'kmeans' 或 'hierarchical'
-    'num_clusters': 3,  # 聚类数量z
-    'output_dir': 'checkpoints/train_20251222_220544/cluster_results',  # 输出目录
-    'viz_methods': ['pca', 'tsne', 'umap'],  # 可视化方法列表
-    'random_state': 42,  # 随机种子
-    'tsne_perplexity': 30.0,  # t-SNE 的 perplexity
-    'umap_neighbors': 15,  # UMAP 的 n_neighbors
-    'umap_min_dist': 0.1,  # UMAP 的 min_dist
-    # 层次聚类参数
-    'linkage': 'ward',  # 层次聚类的链接方法: 'ward', 'complete', 'average', 'single'
-    'metric': 'euclidean',  # 距离度量（当 linkage 不是 'ward' 时使用）
-    'plot_dendrogram': False,  # 是否绘制树状图（大数据时可能很慢）
+    'concat_keys': ['h_spatial', 'h_od'],  # Keys to concatenate when embedding_key='h'
+    'clustering_method': 'hierarchical',  # 'kmeans' or 'hierarchical'
+    'num_clusters': 3,  # Number of clusters
+    'output_dir': 'checkpoints/train_20251222_220544/cluster_results',  # Output directory
+    'viz_methods': ['pca', 'tsne', 'umap'],  # Visualization methods
+    'random_state': 42,  # Random seed
+    'tsne_perplexity': 30.0,  # t-SNE perplexity
+    'umap_neighbors': 15,  # UMAP n_neighbors
+    'umap_min_dist': 0.1,  # UMAP min_dist
+    # Hierarchical clustering parameters
+    'linkage': 'ward',  # Linkage: 'ward', 'complete', 'average', 'single'
+    'metric': 'euclidean',  # Distance metric (when linkage is not 'ward')
+    'plot_dendrogram': False,  # Plot dendrogram (can be slow on large data)
 }
 # ====================================================
 
 
 def _pick_embedding_key(data: "np.lib.npyio.NpzFile") -> str:
-    """从 npz 文件中选择一个最像“嵌入矩阵”的 key。
+    """Pick the key in an npz file that most likely holds the embedding matrix.
 
-    选择规则（从高到低）：
-    - 若存在 'embeddings'，优先使用
-    - 若存在 'z'，其次使用（很多模型会用 z 表示融合后的表征）
-    - 否则在所有二维数组中选 embedding 维度（shape[1]）最大的那个
+    Selection order (highest priority first):
+    - Use 'embeddings' if present
+    - Else use 'z' (many models use z for fused representations)
+    - Else pick the 2D array with the largest embedding dimension (shape[1])
     """
     keys = list(getattr(data, "files", []))
     if "embeddings" in keys:
@@ -79,8 +79,8 @@ def _pick_embedding_key(data: "np.lib.npyio.NpzFile") -> str:
 
     if not candidates:
         raise KeyError(
-            f"无法在 {keys} 中找到可用的二维嵌入矩阵。"
-            f"请确认 npz 内包含形如 (N, D) 的数组，或用 --embedding_key 显式指定。"
+            f"Could not find a usable 2D embedding matrix in {keys}. "
+            f"Ensure the npz contains an (N, D) array, or pass --embedding_key explicitly."
         )
 
     candidates.sort(reverse=True)
@@ -88,29 +88,29 @@ def _pick_embedding_key(data: "np.lib.npyio.NpzFile") -> str:
 
 
 def _concat_embeddings(data: "np.lib.npyio.NpzFile", keys: List[str]) -> np.ndarray:
-    """将多个二维嵌入矩阵按特征维度拼接。
+    """Concatenate multiple 2D embedding matrices along the feature dimension.
 
-    要求：
-    - 每个 key 对应二维 ndarray，形状 (N, D_i)
-    - 所有数组的 N 相同
+    Requirements:
+    - Each key maps to a 2D ndarray of shape (N, D_i)
+    - All arrays share the same N
     """
     arrays: List[np.ndarray] = []
     n_rows: Optional[int] = None
     for k in keys:
         if k not in getattr(data, "files", []):
             raise KeyError(
-                f"npz 中不存在 key='{k}'，可用 keys: {list(getattr(data, 'files', []))}")
+                f"key='{k}' not found in npz; available keys: {list(getattr(data, 'files', []))}")
         arr = data[k]
         if not isinstance(arr, np.ndarray) or arr.ndim != 2:
             raise ValueError(
-                f"key='{k}' 对应的数据不是二维 ndarray。"
-                f"实际类型={type(arr)}, ndim={getattr(arr, 'ndim', None)}, shape={getattr(arr, 'shape', None)}"
+                f"Data for key='{k}' is not a 2D ndarray. "
+                f"type={type(arr)}, ndim={getattr(arr, 'ndim', None)}, shape={getattr(arr, 'shape', None)}"
             )
         if n_rows is None:
             n_rows = arr.shape[0]
         elif arr.shape[0] != n_rows:
             raise ValueError(
-                f"拼接失败：key='{k}' 的行数({arr.shape[0]})与其他嵌入行数({n_rows})不一致。"
+                f"Concatenation failed: key='{k}' has {arr.shape[0]} rows, expected {n_rows}."
             )
         arrays.append(arr)
     return np.concatenate(arrays, axis=1)
@@ -121,48 +121,49 @@ def load_embeddings(
     embedding_key: Optional[str] = None,
     concat_keys: Optional[List[str]] = None
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """从 npz 文件加载节点 ID 与嵌入矩阵"""
+    """Load node IDs and embedding matrix from an npz file."""
     if not os.path.exists(path):
-        raise FileNotFoundError(f"未找到嵌入文件: {path}")
+        raise FileNotFoundError(f"Embeddings file not found: {path}")
 
     data = np.load(path, allow_pickle=True)
     keys = list(getattr(data, "files", []))
 
     requested = (embedding_key or "embeddings").strip()
 
-    # 特殊模式：拼接得到 h（默认拼接 h_spatial + h_od）
+    # Special mode: concatenate to form h (default: h_spatial + h_od)
     if requested.lower() in {"h", "concat"}:
         concat_keys = concat_keys or ["h_spatial", "h_od"]
         embeddings = _concat_embeddings(data, concat_keys)
         key_to_use = f"concat({'+'.join(concat_keys)})"
-        print(f"[提示] 使用拼接嵌入作为输入：{key_to_use}，shape={embeddings.shape}")
+        print(f"[Info] Using concatenated embeddings: {key_to_use}, shape={embeddings.shape}")
     else:
         if requested in keys:
             key_to_use = requested
         else:
             key_to_use = _pick_embedding_key(data)
             print(
-                f"[提示] npz 中未找到 key='{requested}'，将改用 key='{key_to_use}'。"
-                f"可用 keys: {keys}"
+                f"[Info] key='{requested}' not found in npz; using key='{key_to_use}'. "
+                f"Available keys: {keys}"
             )
 
         embeddings = data[key_to_use]
         if not isinstance(embeddings, np.ndarray) or embeddings.ndim != 2:
             raise ValueError(
-                f"key='{key_to_use}' 对应的数据不是二维 ndarray。"
-                f"实际类型={type(embeddings)}, ndim={getattr(embeddings, 'ndim', None)}, shape={getattr(embeddings, 'shape', None)}"
+                f"Data for key='{key_to_use}' is not a 2D ndarray. "
+                f"type={type(embeddings)}, ndim={getattr(embeddings, 'ndim', None)}, shape={getattr(embeddings, 'shape', None)}"
             )
 
     node_ids = data.get('node_ids', np.arange(len(embeddings)))
 
-    # 如果 node_ids 是字节串，转换为字符串
+    # Convert byte strings to str if needed
     if node_ids.dtype.kind in {'S', 'O'}:
         node_ids = np.array([str(x) for x in node_ids])
 
-    # 尽量保证 node_ids 与 embeddings 对齐
+    # Align node_ids with embeddings when possible
     if len(node_ids) != len(embeddings):
         print(
-            f"[警告] node_ids 长度({len(node_ids)})与 embeddings 行数({len(embeddings)})不一致，将使用 0..N-1 作为 node_ids。"
+            f"[Warning] node_ids length ({len(node_ids)}) != embeddings rows ({len(embeddings)}); "
+            f"using 0..N-1 as node_ids."
         )
         node_ids = np.arange(len(embeddings))
 
@@ -170,8 +171,8 @@ def load_embeddings(
 
 
 def run_kmeans(embeddings: np.ndarray, num_clusters: int, random_state: int) -> np.ndarray:
-    """运行 KMeans 并返回聚类标签"""
-    print(f"使用 K-Means 聚类，k={num_clusters}...")
+    """Run KMeans and return cluster labels."""
+    print(f"Running K-Means clustering, k={num_clusters}...")
     kmeans = KMeans(
         n_clusters=num_clusters,
         n_init=10,
@@ -190,45 +191,45 @@ def run_hierarchical(
     plot_dendrogram: bool = False,
     output_dir: Optional[str] = None
 ) -> np.ndarray:
-    """运行层次聚类并返回聚类标签
+    """Run hierarchical clustering and return cluster labels.
 
     Args:
-        embeddings: 嵌入矩阵
-        num_clusters: 聚类数量
-        linkage_method: 链接方法 ('ward', 'complete', 'average', 'single')
-        metric: 距离度量（当 linkage 不是 'ward' 时使用）
-        plot_dendrogram: 是否绘制树状图
-        output_dir: 输出目录（用于保存树状图）
+        embeddings: Embedding matrix
+        num_clusters: Number of clusters
+        linkage_method: Linkage method ('ward', 'complete', 'average', 'single')
+        metric: Distance metric (when linkage is not 'ward')
+        plot_dendrogram: Whether to plot a dendrogram
+        output_dir: Output directory (for saving the dendrogram)
     """
-    print(f"使用层次聚类，k={num_clusters}，linkage={linkage_method}...")
+    print(f"Running hierarchical clustering, k={num_clusters}, linkage={linkage_method}...")
 
-    # 对于大数据，使用 AgglomerativeClustering（更快）
-    # 对于小数据且需要树状图，使用 linkage + fcluster
+    # For large data, use AgglomerativeClustering (faster)
+    # For small data with dendrogram, use linkage + fcluster
 
     n_samples = embeddings.shape[0]
 
     if plot_dendrogram and n_samples <= 1000:
-        # 小数据集：计算完整链接矩阵并绘制树状图
-        print("计算链接矩阵以绘制树状图...")
+        # Small dataset: full linkage matrix and dendrogram
+        print("Computing linkage matrix for dendrogram...")
         if linkage_method == 'ward':
             Z = linkage(embeddings, method=linkage_method, metric='euclidean')
         else:
             Z = linkage(embeddings, method=linkage_method, metric=metric)
 
-        # 绘制树状图
+        # Plot dendrogram
         if output_dir:
             plt.figure(figsize=(15, 8))
             dendrogram(Z, truncate_mode='level', p=min(10, num_clusters * 2))
-            plt.title(f'层次聚类树状图 (linkage={linkage_method})')
-            plt.xlabel('样本索引')
-            plt.ylabel('距离')
+            plt.title(f'Hierarchical clustering dendrogram (linkage={linkage_method})')
+            plt.xlabel('Sample index')
+            plt.ylabel('Distance')
             plt.tight_layout()
             dendrogram_path = os.path.join(output_dir, 'dendrogram.png')
             plt.savefig(dendrogram_path, dpi=300)
             plt.close()
-            print(f"树状图已保存至: {dendrogram_path}")
+            print(f"Dendrogram saved to: {dendrogram_path}")
 
-        # 使用 AgglomerativeClustering 进行聚类
+        # Cluster with AgglomerativeClustering
         if linkage_method == 'ward':
             clustering = AgglomerativeClustering(
                 n_clusters=num_clusters,
@@ -242,9 +243,9 @@ def run_hierarchical(
             )
         labels = clustering.fit_predict(embeddings)
     else:
-        # 大数据集：直接使用 AgglomerativeClustering（不计算完整链接矩阵）
+        # Large dataset: AgglomerativeClustering without full linkage matrix
         if plot_dendrogram and n_samples > 1000:
-            print(f"[警告] 样本数({n_samples})过多，跳过树状图绘制（计算量过大）")
+            print(f"[Warning] Too many samples ({n_samples}); skipping dendrogram (expensive).")
 
         if linkage_method == 'ward':
             clustering = AgglomerativeClustering(
@@ -272,11 +273,11 @@ def run_clustering(
     plot_dendrogram: bool = False,
     output_dir: Optional[str] = None
 ) -> Tuple[np.ndarray, str]:
-    """根据指定方法运行聚类
+    """Run clustering with the specified method.
 
     Returns:
-        labels: 聚类标签
-        method_name: 聚类方法名称（用于显示）
+        labels: Cluster labels
+        method_name: Method name for display
     """
     method = method.lower()
 
@@ -288,9 +289,9 @@ def run_clustering(
             embeddings, num_clusters, linkage_method, metric,
             plot_dendrogram, output_dir
         )
-        method_name = f'层次聚类 (linkage={linkage_method})'
+        method_name = f'Hierarchical clustering (linkage={linkage_method})'
     else:
-        raise ValueError(f"未知的聚类方法: {method}。支持的方法: 'kmeans', 'hierarchical'")
+        raise ValueError(f"Unknown clustering method: {method}. Supported: 'kmeans', 'hierarchical'")
 
     return labels, method_name
 
@@ -303,7 +304,7 @@ def project_embeddings(
     umap_neighbors: int,
     umap_min_dist: float
 ) -> Tuple[np.ndarray, str]:
-    """根据指定降维方法将嵌入映射到二维"""
+    """Project embeddings to 2D with the given dimensionality reduction method."""
     method = method.lower()
     n_samples = embeddings.shape[0]
 
@@ -313,7 +314,7 @@ def project_embeddings(
         title = 'PCA'
     elif method == 'tsne':
         effective_perplexity = min(tsne_perplexity, max(5, n_samples - 1))
-        # 新版本 scikit-learn 使用 max_iter 而不是 n_iter
+        # Newer scikit-learn uses max_iter instead of n_iter
         reducer = TSNE(
             n_components=2,
             perplexity=effective_perplexity,
@@ -327,9 +328,9 @@ def project_embeddings(
     elif method == 'umap':
         if umap is None:
             raise ImportError(
-                "未安装 umap-learn，请运行 `pip install umap-learn` 后重试。"
+                "umap-learn is not installed. Run `pip install umap-learn` and retry."
             )
-        # 抑制 UMAP 关于 random_state 和 n_jobs 的警告
+        # Suppress UMAP warnings about random_state and n_jobs
         with warnings.catch_warnings():
             warnings.filterwarnings(
                 'ignore', message='.*n_jobs.*random_state.*')
@@ -338,12 +339,12 @@ def project_embeddings(
                 n_neighbors=umap_neighbors,
                 min_dist=umap_min_dist,
                 random_state=random_state,
-                n_jobs=1  # 设置 random_state 时会强制单线程
+                n_jobs=1  # single-threaded when random_state is set
             )
             proj = reducer.fit_transform(embeddings)
         title = f"UMAP (n_neighbors={umap_neighbors}, min_dist={umap_min_dist})"
     else:
-        raise ValueError(f"未知的可视化方法: {method}")
+        raise ValueError(f"Unknown visualization method: {method}")
 
     return proj, title
 
@@ -355,7 +356,7 @@ def visualize_clusters(
     output_path: str,
     clustering_method_name: str = 'Clustering'
 ):
-    """根据二维投影绘制聚类散点图"""
+    """Plot cluster scatter from a 2D projection."""
     plt.figure(figsize=(10, 8))
     scatter = plt.scatter(
         proj[:, 0],
@@ -376,13 +377,13 @@ def visualize_clusters(
     plt.tight_layout()
     plt.savefig(output_path, dpi=300)
     plt.close()
-    print(f"聚类可视化已保存至: {output_path}")
+    print(f"Cluster visualization saved to: {output_path}")
 
 
 def summarize_clusters(node_ids: np.ndarray, labels: np.ndarray):
-    """打印每个聚类的节点数量"""
+    """Print node count per cluster."""
     unique, counts = np.unique(labels, return_counts=True)
-    print("聚类结果统计：")
+    print("Cluster summary:")
     for cid, count in zip(unique, counts):
         print(f"  - Cluster {cid}: {count} nodes")
 
@@ -393,107 +394,114 @@ def save_cluster_csv(
     output_dir: str,
     filename: str = 'cluster_assignments.csv'
 ):
-    """保存 node_id 与 cluster_id 的对应关系"""
+    """Save node_id to cluster_id mapping."""
     df = pd.DataFrame({
         'node_id': node_ids,
         'cluster_id': labels
     })
     csv_path = os.path.join(output_dir, filename)
     df.to_csv(csv_path, index=False)
-    print(f"聚类结果 CSV 已保存至: {csv_path}")
+    print(f"Cluster assignments CSV saved to: {csv_path}")
     return csv_path
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="对融合嵌入执行 KMeans 聚类并生成多种可视化")
+        description="KMeans (or hierarchical) clustering on fused embeddings with visualizations")
     parser.add_argument(
         '--embeddings',
         type=str,
         default=DEFAULT_CONFIG['embeddings'],
-        help=f'fused_embeddings.npz 文件路径（默认：{DEFAULT_CONFIG["embeddings"]}）'
+        help=f'Path to fused_embeddings.npz (default: {DEFAULT_CONFIG["embeddings"]})'
     )
     parser.add_argument(
         '--embedding_key',
         type=str,
         default=DEFAULT_CONFIG['embedding_key'],
-        help=f"npz 内用于聚类的嵌入矩阵 key（默认：{DEFAULT_CONFIG['embedding_key']}）。可直接填 h_spatial / h_od 等；也可填 'h' 或 'concat' 表示按 --concat_keys 拼接。若该 key 不存在，将自动兜底选择可用的二维嵌入矩阵（例如 embeddings）。"
+        help=(
+            f"Embedding key in npz for clustering (default: {DEFAULT_CONFIG['embedding_key']}). "
+            f"Use h_spatial / h_od / z, or 'h'/'concat' to concatenate per --concat_keys. "
+            f"If missing, auto-selects a 2D embedding (e.g. embeddings)."
+        )
     )
     parser.add_argument(
         '--concat_keys',
         type=str,
         nargs='+',
         default=DEFAULT_CONFIG['concat_keys'],
-        help=f"当 --embedding_key 为 'h'/'concat' 时，用于拼接的 key 列表（默认：{' '.join(DEFAULT_CONFIG['concat_keys'])}）。"
+        help=(
+            f"Keys to concatenate when --embedding_key is 'h'/'concat' "
+            f"(default: {' '.join(DEFAULT_CONFIG['concat_keys'])})."
+        )
     )
     parser.add_argument(
         '--clustering_method',
         type=str,
         default=DEFAULT_CONFIG['clustering_method'],
         choices=['kmeans', 'hierarchical', 'hier', 'agg'],
-        help=f"聚类方法（默认：{DEFAULT_CONFIG['clustering_method']}）。可选: 'kmeans', 'hierarchical'"
+        help=f"Clustering method (default: {DEFAULT_CONFIG['clustering_method']}). Options: kmeans, hierarchical"
     )
     parser.add_argument(
         '--num_clusters',
         type=int,
         default=DEFAULT_CONFIG['num_clusters'],
-        help=f'聚类数量（默认：{DEFAULT_CONFIG["num_clusters"]}）'
+        help=f'Number of clusters (default: {DEFAULT_CONFIG["num_clusters"]})'
     )
     parser.add_argument(
         '--linkage',
         type=str,
         default=DEFAULT_CONFIG['linkage'],
         choices=['ward', 'complete', 'average', 'single'],
-        help=f"层次聚类的链接方法（默认：{DEFAULT_CONFIG['linkage']}）。可选: 'ward', 'complete', 'average', 'single'"
+        help=f"Hierarchical linkage (default: {DEFAULT_CONFIG['linkage']}). Options: ward, complete, average, single"
     )
     parser.add_argument(
         '--metric',
         type=str,
         default=DEFAULT_CONFIG['metric'],
-        help=f"层次聚类的距离度量（默认：{DEFAULT_CONFIG['metric']}）。当 linkage 不是 'ward' 时使用"
+        help=f"Distance metric for hierarchical clustering (default: {DEFAULT_CONFIG['metric']}); used when linkage != ward"
     )
     parser.add_argument(
         '--plot_dendrogram',
         action='store_true',
         default=DEFAULT_CONFIG['plot_dendrogram'],
-        help=f'是否绘制层次聚类的树状图（默认：{DEFAULT_CONFIG["plot_dendrogram"]}，大数据时可能很慢）'
+        help=f'Plot hierarchical dendrogram (default: {DEFAULT_CONFIG["plot_dendrogram"]}; slow on large data)'
     )
     parser.add_argument(
         '--output_dir',
         type=str,
         default=DEFAULT_CONFIG['output_dir'],
-        help=f'输出目录（保存 CSV 及所有可视化图片）（默认：{DEFAULT_CONFIG["output_dir"]}）'
+        help=f'Output directory for CSV and plots (default: {DEFAULT_CONFIG["output_dir"]})'
     )
     parser.add_argument(
         '--viz_methods',
         type=str,
         nargs='+',
         default=DEFAULT_CONFIG['viz_methods'],
-        help=f'可视化方法列表，可选: pca, tsne, umap（默认：{" ".join(DEFAULT_CONFIG["viz_methods"])}）'
+        help=f'Visualization methods: pca, tsne, umap (default: {" ".join(DEFAULT_CONFIG["viz_methods"])})'
     )
     parser.add_argument(
         '--random_state',
         type=int,
         default=DEFAULT_CONFIG['random_state'],
-        help=f'随机种子（默认：{DEFAULT_CONFIG["random_state"]}）'
+        help=f'Random seed (default: {DEFAULT_CONFIG["random_state"]})'
     )
     parser.add_argument(
         '--tsne_perplexity',
         type=float,
         default=DEFAULT_CONFIG['tsne_perplexity'],
-        help=f't-SNE 的 perplexity（将自动限制在样本数范围内）（默认：{DEFAULT_CONFIG["tsne_perplexity"]}）'
+        help=f't-SNE perplexity (clamped to sample size) (default: {DEFAULT_CONFIG["tsne_perplexity"]})'
     )
     parser.add_argument(
         '--umap_neighbors',
         type=int,
         default=DEFAULT_CONFIG['umap_neighbors'],
-        help=f'UMAP 的 n_neighbors（默认：{DEFAULT_CONFIG["umap_neighbors"]}）'
+        help=f'UMAP n_neighbors (default: {DEFAULT_CONFIG["umap_neighbors"]})'
     )
     parser.add_argument(
         '--umap_min_dist',
         type=float,
         default=DEFAULT_CONFIG['umap_min_dist'],
-        help=f'UMAP 的 min_dist（默认：{DEFAULT_CONFIG["umap_min_dist"]}）'
+        help=f'UMAP min_dist (default: {DEFAULT_CONFIG["umap_min_dist"]})'
     )
     return parser.parse_args()
 
@@ -503,7 +511,7 @@ def main():
     node_ids, embeddings = load_embeddings(
         args.embeddings, args.embedding_key, args.concat_keys)
 
-    # 运行聚类
+    # Run clustering
     labels, clustering_method_name = run_clustering(
         embeddings=embeddings,
         method=args.clustering_method,
@@ -533,7 +541,7 @@ def main():
                 umap_min_dist=args.umap_min_dist
             )
         except Exception as exc:
-            print(f"[警告] {method} 可视化失败: {exc}")
+            print(f"[Warning] {method} visualization failed: {exc}")
             continue
 
         filename = f'clusters_{method}.png'

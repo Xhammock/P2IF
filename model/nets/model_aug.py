@@ -31,8 +31,8 @@ class FeedForward(nn.Module):
 
 class UrbanModelAug(nn.Module):
     """
-    两级结构：空间 GraphSAGE + OD 交叉注意力 + 投影头
-    使用视图增强的对比学习（Spatial-aware NT-Xent）
+    Two-stage architecture: spatial GraphSAGE + OD cross-attention + projection head.
+    Uses view-augmented contrastive learning (spatially aware NT-Xent).
     """
 
     def __init__(
@@ -44,24 +44,24 @@ class UrbanModelAug(nn.Module):
         dropout: float = 0.1,
         proj_dim: int = 128,
         loss_weight: Dict[str, float] | None = None,
-        # 视图增强参数
+        # View augmentation parameters
         feat_drop_ratio: float = 0.1,
         edge_drop_ratio: float = 0.075,
         noise_std: float = 0.01,
         tau: float = 0.1,  # NT-Xent temperature
-        # Spatial-aware NT-Xent：额外屏蔽 OD 强邻居
-        # od_mask_topk == -1: 屏蔽所有有流量的节点对（flow > 0）
-        # od_mask_topk > 0: 屏蔽每个节点流量最大的 top-k 个邻居
-        # od_mask_topk <= 0 (且 != -1): 不屏蔽OD邻居
+        # Spatially aware NT-Xent: additionally mask strong OD neighbors
+        # od_mask_topk == -1: mask all node pairs with flow > 0
+        # od_mask_topk > 0: mask top-k highest-flow neighbors per node
+        # od_mask_topk <= 0 (and != -1): do not mask OD neighbors
         od_mask_topk: int = 200,
-        # 消融实验参数：控制是否使用某个特征模态
+        # Ablation flags: whether to use each feature modality
         use_poi: bool = True,
         use_vis: bool = True,
         use_street: bool = True,
     ):
         super().__init__()
         self.dims = dims
-        # 消融实验：根据use_poi、use_vis和use_street参数调整实际使用的维度
+        # Ablation: adjust effective dimensions based on use_poi / use_vis / use_street
         self.use_poi = use_poi
         self.use_vis = use_vis
         self.use_street = use_street
@@ -69,28 +69,28 @@ class UrbanModelAug(nn.Module):
         actual_vis_dim = dims["vis"] if use_vis else 0
         actual_street_dim = dims.get("street", 0) if use_street else 0
         in_dim = actual_poi_dim + dims["res"] + actual_vis_dim + actual_street_dim
-        
-        # 保存原始维度信息，用于从完整特征中提取需要的部分
+
+        # Original dimension metadata for slicing full feature vectors
         self.original_poi_dim = dims["poi"]
         self.original_vis_dim = dims["vis"]
         self.original_street_dim = dims.get("street", 0)
         self.res_dim = dims["res"]
         self.street_dim = actual_street_dim
 
-        # 视图增强参数
+        # View augmentation parameters
         self.tau = tau
         self.feat_drop_ratio = feat_drop_ratio
         self.edge_drop_ratio = edge_drop_ratio
         self.noise_std = noise_std
         self.od_mask_topk = int(od_mask_topk)
 
-        # Spatial-aware NT-Xent：缓存"允许作为负样本"的mask（非邻居=True，邻居/自身=False）
-        # 注意：会在forward里根据传入的原始空间图懒构建，并随device迁移
+        # Spatially aware NT-Xent: cache allow_mask (non-neighbor=True, neighbor/self=False)
+        # Built lazily from the original spatial graph in forward(); moves with device
         self._spatial_allow_mask: torch.Tensor | None = None
         self._spatial_allow_mask_num_nodes: int | None = None
         self._spatial_allow_mask_num_edges: int | None = None
 
-        # OD allow mask（按每个节点 top-k flow 选邻居并屏蔽）
+        # OD allow mask (mask top-k flow neighbors per node)
         self._od_allow_mask: torch.Tensor | None = None
         self._od_allow_mask_num_nodes: int | None = None
         self._od_allow_mask_num_edges: int | None = None
@@ -99,7 +99,7 @@ class UrbanModelAug(nn.Module):
             in_dim, hidden_dim, num_layers=sage_layers, dropout=dropout)
 
         self.q_dim = dims["res"]
-        # 使用实际维度（考虑消融实验）
+        # Effective dimensions (after ablation)
         self.poi_dim = actual_poi_dim
         self.vis_dim = actual_vis_dim
         self.street_dim = dims.get("street", 0)
@@ -119,8 +119,8 @@ class UrbanModelAug(nn.Module):
         self.ffn_od = FeedForward(hidden_dim, dropout)
 
         self.proj = ProjectionHead(hidden_dim, hidden_dim, proj_dim)
-        # 将空间层输出映射到 Query / 各模态 KeyValue 所需维度
-        # 支持消融实验：如果某个模态被禁用，则不创建对应的投影层
+        # Map spatial output to Query / modality Key dimensions
+        # Ablation: skip projection layers for disabled modalities
         self.q_proj = nn.Linear(hidden_dim, self.q_dim)
         self.poi_proj = nn.Linear(hidden_dim, self.poi_dim) if self.poi_dim > 0 else None
         self.vis_proj = nn.Linear(hidden_dim, self.vis_dim) if self.vis_dim > 0 else None
@@ -128,13 +128,13 @@ class UrbanModelAug(nn.Module):
             hidden_dim, self.street_dim) if self.street_dim > 0 else None
 
     def forward(self, batch: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, Dict]:
-        # 生成两个增强视图
+        # Build two augmented views
         view1_spatial, view1_od, view1_feat = self._create_view1(
             batch["g_spatial"], batch["g_od"], batch["feat"])
         view2_spatial, view2_od, view2_feat = self._create_view2(
             batch["g_spatial"], batch["g_od"], batch["feat"])
 
-        # 对两个视图分别编码
+        # Encode both views
         batch_v1 = {"g_spatial": view1_spatial,
                     "g_od": view1_od, "feat": view1_feat}
         batch_v2 = {"g_spatial": view2_spatial,
@@ -142,17 +142,17 @@ class UrbanModelAug(nn.Module):
         h_spatial_v1, h_od_v1, z_v1 = self._encode(batch_v1)
         h_spatial_v2, h_od_v2, z_v2 = self._encode(batch_v2)
 
-        # Spatial-aware NT-Xent：使用"原始空间图/OD图"构建mask（不基于dropedge后的图）
-        # - 空间邻居不作为负样本
-        # - OD 强邻居（每个节点 top-k flow）不作为负样本
+        # Spatially aware NT-Xent: build masks from original graphs (not drop-edge views)
+        # - Spatial neighbors are not negatives
+        # - Strong OD neighbors (top-k flow per node) are not negatives
         self._ensure_spatial_allow_mask(
             batch["g_spatial"], device=z_v1.device)
         self._ensure_od_allow_mask(batch["g_od"], device=z_v1.device)
 
-        # 计算对比损失（z_v1和z_v2已在_encode中L2归一化）
+        # Contrastive loss (z_v1 and z_v2 are L2-normalized in _encode)
         loss, info = self._contrastive_loss(z_v1, z_v2)
 
-        # 使用v1的编码作为主要输出（用于推理）
+        # Use view-1 encodings as primary outputs (inference)
         info.update({
             "h_spatial": h_spatial_v1,
             "h_od": h_od_v1,
@@ -162,43 +162,38 @@ class UrbanModelAug(nn.Module):
 
     def encode(self, batch: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        返回空间层输出、OD 层输出以及最终投影后的表征 z（已 L2 归一化）。
-        用于推理/可视化，外部需保证 no_grad。
-        推理时不使用数据增强。
+        Return spatial output, OD output, and final projected representation z (L2-normalized).
+        For inference / visualization; caller should use no_grad.
+        No data augmentation at inference time.
         """
         h_spatial, h_od, z = self._encode(batch)
         return h_spatial, h_od, z
 
     def _extract_features(self, feats: torch.Tensor) -> torch.Tensor:
         """
-        从完整的特征向量中提取需要的部分（支持消融实验）。
-        完整特征格式：[poi, res, vis, street]
+        Slice the full feature vector for ablation experiments.
+        Full layout: [poi, res, vis, street]
         """
         parts = []
         start_idx = 0
-        
-        # POI特征
+
         if self.use_poi:
             parts.append(feats[:, start_idx:start_idx + self.original_poi_dim])
         start_idx += self.original_poi_dim
-        
-        # Res特征（总是使用）
+
+        # Resident features are always used
         parts.append(feats[:, start_idx:start_idx + self.res_dim])
         start_idx += self.res_dim
-        
-        # Vis特征
+
         if self.use_vis:
             parts.append(feats[:, start_idx:start_idx + self.original_vis_dim])
-        # 无论是否使用vis，都需要跳过这部分索引（如果原始数据中有vis特征）
         start_idx += self.original_vis_dim
-        
-        # Street特征（街景）
+
         if self.use_street and self.original_street_dim > 0:
             parts.append(feats[:, start_idx:start_idx + self.original_street_dim])
-        # 无论是否使用street，都需要跳过这部分索引（如果原始数据中有street特征）
         if self.original_street_dim > 0:
             start_idx += self.original_street_dim
-        
+
         return torch.cat(parts, dim=-1) if len(parts) > 0 else feats
 
     def _encode(self, batch: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -207,37 +202,33 @@ class UrbanModelAug(nn.Module):
         feats = batch["feat"]
         device = feats.device
 
-        # 消融实验：从完整特征中提取需要的部分
         feats = self._extract_features(feats)
 
-        # Spatial encoder
         h_spatial = self.spatial(g_spatial, feats)
         h_spatial = self.ffn_spatial(h_spatial)
 
-        # 使用第一层输出构造 Q/K：Q 用 res 子空间，K 用 poi+vis+street 子空间（仅用于计算注意力分数）
-        # Value 使用整体特征 h_spatial
-        # 支持消融实验：如果某个模态被禁用，使用零向量
+        # Q from res subspace; Keys from poi / vis / street subspaces (attention scores only)
+        # Value uses full h_spatial
         q_in = self.q_proj(h_spatial)
-        
+
         if self.poi_proj is not None:
             poi_in = self.poi_proj(h_spatial)
         else:
             poi_in = torch.zeros(
                 (h_spatial.shape[0], 0), device=h_spatial.device, dtype=h_spatial.dtype)
-        
+
         if self.vis_proj is not None:
             vis_in = self.vis_proj(h_spatial)
         else:
             vis_in = torch.zeros(
                 (h_spatial.shape[0], 0), device=h_spatial.device, dtype=h_spatial.dtype)
-        
+
         if self.street_proj is not None:
             street_in = self.street_proj(h_spatial)
         else:
             street_in = torch.zeros(
                 (h_spatial.shape[0], 0), device=h_spatial.device, dtype=h_spatial.dtype)
-        
-        # 构建fused特征：拼接所有可用的模态
+
         fused_parts = []
         if self.poi_dim > 0:
             fused_parts.append(poi_in)
@@ -245,11 +236,10 @@ class UrbanModelAug(nn.Module):
             fused_parts.append(vis_in)
         if self.street_dim > 0:
             fused_parts.append(street_in)
-        
+
         if len(fused_parts) > 0:
             fused_in = torch.cat(fused_parts, dim=-1)
         else:
-            # 如果所有模态都被禁用，创建一个空的fused特征
             fused_in = torch.zeros(
                 (h_spatial.shape[0], 0), device=h_spatial.device, dtype=h_spatial.dtype)
 
@@ -262,10 +252,7 @@ class UrbanModelAug(nn.Module):
         return h_spatial, h_od, z
 
     def _create_view1(self, g_spatial, g_od, feats: torch.Tensor) -> Tuple:
-        """
-        视图1：特征dropout + 高斯噪声
-        """
-        # 特征dropout：随机mask一些特征维度
+        """View 1: feature dropout + Gaussian noise."""
         if self.training and self.feat_drop_ratio > 0:
             feat_mask = torch.rand(
                 feats.shape, device=feats.device) > self.feat_drop_ratio
@@ -273,12 +260,10 @@ class UrbanModelAug(nn.Module):
         else:
             view1_feat = feats
 
-        # 添加高斯噪声
         if self.training and self.noise_std > 0:
             noise = torch.randn_like(view1_feat) * self.noise_std
             view1_feat = view1_feat + noise
 
-        # 图结构不变，只更新特征
         view1_spatial = g_spatial.clone()
         view1_spatial.ndata["feat"] = view1_feat.clone()
         view1_od = g_od.clone()
@@ -286,16 +271,12 @@ class UrbanModelAug(nn.Module):
         return view1_spatial, view1_od, view1_feat
 
     def _create_view2(self, g_spatial, g_od, feats: torch.Tensor) -> Tuple:
-        """
-        视图2：dropedge (5%-10%) + 高斯噪声
-        """
-        # 添加高斯噪声到特征
+        """View 2: drop-edge (5–10%) + Gaussian noise."""
         view2_feat = feats
         if self.training and self.noise_std > 0:
             noise = torch.randn_like(view2_feat) * self.noise_std
             view2_feat = view2_feat + noise
 
-        # DropEdge：随机删除一些边
         view2_spatial = self._drop_edges(g_spatial, self.edge_drop_ratio)
         view2_spatial.ndata["feat"] = view2_feat.clone()
         view2_od = self._drop_edges(g_od, self.edge_drop_ratio)
@@ -303,9 +284,7 @@ class UrbanModelAug(nn.Module):
         return view2_spatial, view2_od, view2_feat
 
     def _drop_edges(self, g, drop_ratio: float):
-        """
-        随机删除图中一定比例的边
-        """
+        """Randomly drop a fraction of edges."""
         if not self.training or drop_ratio <= 0:
             return g.clone()
         num_edges = g.num_edges()
@@ -315,21 +294,17 @@ class UrbanModelAug(nn.Module):
         if num_drop == 0:
             return g.clone()
 
-        # 获取设备信息（从节点特征获取）
         device = g.ndata["feat"].device
 
-        # 随机选择要保留的边
         eids = torch.randperm(num_edges, device=device)
         keep_eids = eids[num_drop:].sort()[0]
 
-        # 创建新图，只保留选中的边
         src, dst = g.edges()
         src_keep = src[keep_eids]
         dst_keep = dst[keep_eids]
         new_g = dgl.graph((src_keep, dst_keep), num_nodes=g.num_nodes())
         new_g.ndata["feat"] = g.ndata["feat"].clone()
 
-        # 保留边特征（如果有）
         if len(g.edata) > 0:
             for key in g.edata:
                 new_g.edata[key] = g.edata[key][keep_eids].clone()
@@ -338,14 +313,13 @@ class UrbanModelAug(nn.Module):
 
     def _ensure_spatial_allow_mask(self, g_spatial, device: torch.device) -> None:
         """
-        构建/更新空间非邻居mask（allow_mask），用于在NT-Xent里屏蔽空间邻居负样本。
-        allow_mask[i, j] == True 表示：j 可以作为 i 的负样本（即 i 与 j 在空间图中不相邻）。
-        注意：为了不影响正样本（labels=arange(N)），对角线会强制为 True。
+        Build/update spatial allow_mask for NT-Xent (mask spatial neighbors as negatives).
+        allow_mask[i, j] == True means j may be a negative for i (not a spatial neighbor).
+        Diagonal is forced True so positive pairs (labels=arange(N)) remain valid.
         """
         num_nodes = g_spatial.num_nodes()
         num_edges = g_spatial.num_edges()
 
-        # 若缓存有效且device一致，直接复用
         if (
             self._spatial_allow_mask is not None
             and self._spatial_allow_mask.device == device
@@ -354,18 +328,17 @@ class UrbanModelAug(nn.Module):
         ):
             return
 
-        # 构建邻接（含自环），再取非邻居
         adj = torch.zeros((num_nodes, num_nodes),
                           device=device, dtype=torch.bool)
         src, dst = g_spatial.edges()
         src = src.to(device)
         dst = dst.to(device)
         adj[src, dst] = True
-        adj[dst, src] = True  # 无向图
-        adj.fill_diagonal_(True)  # 自身不作为负样本
+        adj[dst, src] = True  # undirected
+        adj.fill_diagonal_(True)  # self is not a negative
 
-        allow_mask = ~adj  # True表示非邻居
-        allow_mask.fill_diagonal_(True)  # 但对角线必须保留为True，保证正样本可用
+        allow_mask = ~adj
+        allow_mask.fill_diagonal_(True)  # keep diagonal for positive pairs
 
         self._spatial_allow_mask = allow_mask
         self._spatial_allow_mask_num_nodes = num_nodes
@@ -373,19 +346,17 @@ class UrbanModelAug(nn.Module):
 
     def _ensure_od_allow_mask(self, g_od, device: torch.device) -> None:
         """
-        构建/更新 OD 非邻居mask（allow_mask），用于在NT-Xent里屏蔽 OD 强邻居负样本。
-        定义 OD 邻居：
-        - 如果 od_mask_topk == -1：屏蔽所有有流量的节点对（flow > 0）
-        - 如果 od_mask_topk > 0：对每个节点 i，从与 i 相连的 OD 边（忽略方向）中，
-          选择 flow 最大的 top-k 个邻居节点作为"OD 邻居"（不作为负样本）。
-        - 如果 od_mask_topk <= 0（且 != -1）：不屏蔽OD邻居
-        allow_mask_od[i, j] == True 表示：j 可以作为 i 的负样本（即 j 不是 i 的 OD 邻居）。
-        对角线强制为 True（保证正样本可用）。
+        Build/update OD allow_mask for NT-Xent (mask strong OD neighbors as negatives).
+        OD neighbor definition:
+        - od_mask_topk == -1: mask all pairs with flow > 0
+        - od_mask_topk > 0: per node i, top-k flow neighbors (undirected) are masked
+        - od_mask_topk <= 0 (and != -1): do not mask OD neighbors
+        allow_mask_od[i, j] == True means j may be a negative for i.
+        Diagonal is forced True.
         """
         num_nodes = g_od.num_nodes()
         num_edges = g_od.num_edges()
 
-        # k<=0 且 != -1：不屏蔽OD邻居
         if self.od_mask_topk <= 0 and self.od_mask_topk != -1:
             allow_mask = torch.ones(
                 (num_nodes, num_nodes), device=device, dtype=torch.bool)
@@ -395,7 +366,6 @@ class UrbanModelAug(nn.Module):
             self._od_allow_mask_num_edges = num_edges
             return
 
-        # 缓存有效且device一致，直接复用
         if (
             self._od_allow_mask is not None
             and self._od_allow_mask.device == device
@@ -414,7 +384,7 @@ class UrbanModelAug(nn.Module):
             flow = torch.ones((src.numel(),), device=device,
                               dtype=torch.float32)
 
-        # 忽略方向：同时加入 src->dst 与 dst->src
+        # Undirected: include both src->dst and dst->src
         u = torch.cat([src, dst], dim=0)
         v = torch.cat([dst, src], dim=0)
         w = torch.cat([flow, flow], dim=0)
@@ -422,13 +392,11 @@ class UrbanModelAug(nn.Module):
         neighbor_mask = torch.zeros(
             (num_nodes, num_nodes), device=device, dtype=torch.bool)
 
-        # od_mask_topk == -1：屏蔽所有有流量的节点对
         if self.od_mask_topk == -1:
-            # 直接标记所有有边的节点对
             neighbor_mask[src, dst] = True
-            neighbor_mask[dst, src] = True  # 无向图
+            neighbor_mask[dst, src] = True
         else:
-            # 逐节点分段取 top-k（城市网格规模通常可接受；需要更大规模可再做向量化/稀疏化）
+            # Per-node top-k (acceptable for city grid scale; vectorize for larger graphs)
             order = torch.argsort(u)
             u_sorted = u[order]
             v_sorted = v[order]
@@ -447,7 +415,6 @@ class UrbanModelAug(nn.Module):
                     cand_v = v_sorted[start:end]
                     cand_w = w_sorted[start:end]
 
-                    # 去掉自身
                     keep = cand_v != node
                     cand_v = cand_v[keep]
                     cand_w = cand_w[keep]
@@ -459,12 +426,11 @@ class UrbanModelAug(nn.Module):
                         neighbor_mask[node, top_v] = True
                 start = end
 
-        # 对称化（OD 邻居视作无向）
         neighbor_mask = neighbor_mask | neighbor_mask.t()
-        neighbor_mask.fill_diagonal_(True)  # 自身不作为负样本
+        neighbor_mask.fill_diagonal_(True)
 
         allow_mask = ~neighbor_mask
-        allow_mask.fill_diagonal_(True)  # 但对角线必须保留为True，保证正样本可用
+        allow_mask.fill_diagonal_(True)
 
         self._od_allow_mask = allow_mask
         self._od_allow_mask_num_nodes = num_nodes
@@ -472,9 +438,9 @@ class UrbanModelAug(nn.Module):
 
     def _contrastive_loss(self, z1: torch.Tensor, z2: torch.Tensor) -> Tuple[torch.Tensor, Dict]:
         """
-        基于视图增强的对比损失
-        - z1, z2: 两个视图的节点表征 [N, D]，已L2归一化
-        - 对应节点互为正样本，使用in-batch negatives
+        View-augmented contrastive loss.
+        - z1, z2: node representations [N, D], L2-normalized
+        - Corresponding nodes are positives; in-batch negatives otherwise
         """
         allow_mask = None
         if self._spatial_allow_mask is not None and self._od_allow_mask is not None:
@@ -500,15 +466,14 @@ class UrbanModelAug(nn.Module):
         Args:
             z1, z2: [N, D], L2-normalized node representations
             tau: temperature
-            allow_mask: [N, N] bool，True表示该位置参与softmax；False表示屏蔽（置为-inf）
+            allow_mask: [N, N] bool; True = participate in softmax; False = masked (-inf)
 
         Returns:
             contrastive loss
         """
-        logits = torch.matmul(z1, z2.t()) / tau  # [N, N]
+        logits = torch.matmul(z1, z2.t()) / tau
 
         if allow_mask is not None:
-            # 屏蔽"自身+空间邻居"作为负样本（但对角线必须是True，否则labels无法对齐）
             logits = logits.masked_fill(~allow_mask, float("-inf"))
 
         labels = torch.arange(z1.size(0), device=z1.device)

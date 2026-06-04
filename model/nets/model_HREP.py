@@ -311,7 +311,7 @@ class UrbanModelHREP(nn.Module):
         inner2 = torch.mm(d_emb, s_emb.t())
         pd_hat = F.softmax(inner2, dim=-1)
         mob = mob / (mob.mean() + 1e-8)
-        # 对 N×N 项取均值而非求和，否则 loss 随节点数平方增长（易达 1e8 量级）
+        # Mean over N×N terms instead of sum, so loss does not scale quadratically with N (can reach ~1e8 otherwise)
         ce = -mob * torch.log(ps_hat + 1e-8) - mob * torch.log(pd_hat + 1e-8)
         return ce.mean()
 
@@ -347,7 +347,7 @@ class UrbanModelHREP(nn.Module):
         pos_idx, neg_idx = _sample_pos_neg(neighbor_lists, device=device)
         geo_loss = self.triplet(n_emb, n_emb[pos_idx], n_emb[neg_idx])
         m_loss = self._mob_loss(s_emb, d_emb, mobility)
-        # poi_sim 为余弦相似度 [-1,1]；点积矩阵未 L2 归一化时量级差几个数量级，MSE 会失真
+        # poi_sim is cosine similarity in [-1, 1]; MSE on unnormalized dot products would be badly scaled
         poi_loss = self.mse(_cosine_sim_matrix(poi_emb), poi_sim)
         loss = poi_loss + m_loss + geo_loss
         return h_spatial, h_od, z, {"loss": loss, "poi_loss": poi_loss, "mob_loss": m_loss, "geo_loss": geo_loss}

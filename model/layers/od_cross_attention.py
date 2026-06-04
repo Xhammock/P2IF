@@ -9,16 +9,17 @@ from dgl.nn.functional import edge_softmax
 
 class ODCrossAttention(nn.Module):
     """
-    基于 OD 图的多头交叉注意力，带边偏置（flow）。
-    边方向：src -> dst，其中 src 为目的地，dst 为源（聚合到 dst）。
+    Multi-head cross-attention on the OD graph with edge bias (flow).
+    Edge direction: src -> dst, where src is the destination and dst is the source
+    (messages aggregate at dst).
 
-    设计目标：让不同 head 负责不同模态的交叉注意力（语义分工）。
-    - head0: res -> poi (仅用于计算注意力分数)
-    - head1: res -> vis (仅用于计算注意力分数)
-    - head2: res -> fused(poi+vis+street) (仅用于计算注意力分数)
-    - head3: res -> street (仅用于计算注意力分数，街景专用)
-    - 若 n_heads > 4：head4... 默认也使用 fused (仅用于计算注意力分数)
-    - Value 使用整体特征 h_spatial，而不是子空间特征
+    Design: assign different heads to cross-attention over different modalities.
+    - head0: res -> poi (attention scores only)
+    - head1: res -> vis (attention scores only)
+    - head2: res -> fused(poi+vis+street) (attention scores only)
+    - head3: res -> street (attention scores only; street-view dedicated)
+    - if n_heads > 4: head4+ default to fused (attention scores only)
+    - Value uses full representation h_spatial, not subspace features
     """
 
     def __init__(
@@ -33,20 +34,22 @@ class ODCrossAttention(nn.Module):
         dropout: float = 0.0,
     ):
         super().__init__()
-        assert hidden_dim % n_heads == 0, "hidden_dim 必须能被 n_heads 整除"
-        assert n_heads >= 4, "为了实现 head0/1/2/3 的模态分工，n_heads 必须 >= 4"
+        assert hidden_dim % n_heads == 0, "hidden_dim must be divisible by n_heads"
+        assert n_heads >= 4, (
+            "n_heads must be >= 4 for head0/1/2/3 modality specialization"
+        )
         self.head_dim = hidden_dim // n_heads
         self.n_heads = n_heads
 
         self.w_q = nn.Linear(in_q_dim, hidden_dim, bias=False)
-        # 每个模态各自映射到 head_dim，仅用于计算注意力分数（Key）
-        # 支持消融实验：如果维度为0，则不创建对应的Linear层
+        # Per-modality projection to head_dim for attention scores (Key) only
+        # Ablation: skip Linear layers when input dimension is 0
         self.w_k_poi = nn.Linear(in_poi_dim, self.head_dim, bias=False) if in_poi_dim > 0 else None
         self.w_k_vis = nn.Linear(in_vis_dim, self.head_dim, bias=False) if in_vis_dim > 0 else None
         self.w_k_street = nn.Linear(
             in_street_dim, self.head_dim, bias=False) if in_street_dim > 0 else None
         self.w_k_fused = nn.Linear(in_fused_dim, self.head_dim, bias=False) if in_fused_dim > 0 else None
-        # Value 使用整体特征，投影到 hidden_dim
+        # Value: full features projected to hidden_dim
         self.w_v = nn.Linear(hidden_dim, hidden_dim, bias=False)
         self.edge_mlp = nn.Sequential(
             nn.Linear(1, hidden_dim),
@@ -69,66 +72,66 @@ class ODCrossAttention(nn.Module):
         h_spatial: torch.Tensor,
     ):
         """
-        g: OD 图，方向 src->dst
-        q_feats: [N, q_dim]，用于 Query（来自 res 子向量）
-        poi_feats: [N, poi_dim]，用于 head0 的 Key（仅用于计算注意力分数）
-        vis_feats: [N, vis_dim]，用于 head1 的 Key（仅用于计算注意力分数）
-        street_feats: [N, street_dim]，用于 head3 的 Key（仅用于计算注意力分数，街景专用）
-        fused_feats: [N, fused_dim]，用于 head2(及其后续 head) 的 Key（仅用于计算注意力分数）
-        edge_flow: [E, 1]，流量特征
-        h_spatial: [N, hidden_dim]，整体特征，用于 Value（聚合时使用）
+        g: OD graph, direction src->dst
+        q_feats: [N, q_dim], Query (from res sub-vector)
+        poi_feats: [N, poi_dim], Key for head0 (attention scores only)
+        vis_feats: [N, vis_dim], Key for head1 (attention scores only)
+        street_feats: [N, street_dim], Key for head3 (attention scores only; street-view)
+        fused_feats: [N, fused_dim], Key for head2 and later heads (attention scores only)
+        edge_flow: [E, 1], flow features
+        h_spatial: [N, hidden_dim], full features for Value (aggregation)
         """
         n = q_feats.shape[0]
         device = q_feats.device
 
-        # Query: 使用子空间特征
+        # Query: subspace features
         q = self.w_q(q_feats).view(n, self.n_heads, self.head_dim)
 
-        # Key: 按 head 分配不同模态的子空间特征（仅用于计算注意力分数）
+        # Key: per-head modality subspace (attention scores only)
         k = torch.zeros((n, self.n_heads, self.head_dim),
                         device=device, dtype=q.dtype)
 
-        # 支持消融实验：如果某个模态被禁用（维度为0），使用fused或零向量
-        # 先计算所有可用的k值
+        # Ablation: if a modality is disabled (dim 0), use fused or zeros
+        # Precompute all available k projections
         k_poi = self.w_k_poi(poi_feats) if self.w_k_poi is not None else None
         k_vis = self.w_k_vis(vis_feats) if self.w_k_vis is not None else None
         k_fused = self.w_k_fused(fused_feats) if self.w_k_fused is not None else None
 
-        # head0: 使用POI（如果可用），否则使用fused或零向量
+        # head0: POI if available, else fused or zeros
         if k_poi is not None:
             k[:, 0, :] = k_poi
         elif k_fused is not None:
             k[:, 0, :] = k_fused
-        # 否则保持为0（已在初始化时设为0）
+        # else remain zero (initialized to 0)
 
-        # head1: 使用vis（如果可用），否则使用fused或零向量
+        # head1: vis if available, else fused or zeros
         if k_vis is not None:
             k[:, 1, :] = k_vis
         elif k_fused is not None:
             k[:, 1, :] = k_fused
-        # 否则保持为0
+        # else remain zero
 
-        # head2: 使用fused（如果可用）
+        # head2: fused if available
         if k_fused is not None:
             k[:, 2, :] = k_fused
 
-        # head3 使用街景特征
+        # head3: street-view features
         if self.w_k_street is not None:
             k_street = self.w_k_street(street_feats)  # [N, head_dim]
             k[:, 3, :] = k_street
-            # head4 及以后使用 fused（如果fused可用）
+            # head4+: fused if available
             if self.n_heads > 4 and self.w_k_fused is not None:
                 k[:, 4:, :] = k_fused.unsqueeze(
                     1).expand(-1, self.n_heads - 4, -1)
         else:
-            # 如果没有街景，head3 及以后都使用 fused（如果fused可用）
+            # No street view: head3+ use fused if available
             if self.n_heads > 3 and self.w_k_fused is not None:
                 k[:, 3:, :] = k_fused.unsqueeze(
                     1).expand(-1, self.n_heads - 3, -1)
 
-        # Value: 使用整体特征 h_spatial，投影到 hidden_dim
+        # Value: full h_spatial projected to hidden_dim
         v = self.w_v(h_spatial)  # [N, hidden_dim]
-        # 将 Value 按 head 分割，每个 head 使用 head_dim 维度
+        # Split Value per head
         v = v.view(n, self.n_heads, self.head_dim)  # [N, n_heads, head_dim]
 
         bias = self.edge_mlp(edge_flow).unsqueeze(-1)  # [E, heads, 1]
@@ -149,7 +152,7 @@ class ODCrossAttention(nn.Module):
         # softmax over incoming edges of dst
         g.edata["a"] = edge_softmax(g, g.edata["score"])
 
-        # 聚合：使用整体特征的 Value，按注意力权重聚合
+        # Aggregate: Value from full features, weighted by attention
         g.update_all(fn.u_mul_e("v", "a", "m"), fn.sum("m", "h"))
         h = g.ndata["h"].reshape(-1, self.n_heads * self.head_dim)
         q_residual = q.reshape(-1, self.n_heads * self.head_dim)
@@ -159,12 +162,12 @@ class ODCrossAttention(nn.Module):
 
 class ODCrossAttentionUnified(nn.Module):
     """
-    消融变体：去除分模态交互机制（W/o Interaction）。
+    Ablation variant: remove per-modality interaction (W/o Interaction).
 
-    与 ODCrossAttention 的差异：
-    - 不再为不同 head 指派不同模态 Key 子空间；
-    - 只使用“全模态融合特征 fused_feats”作为 Key，且所有 head 共用同一套 Key；
-    - Value 仍使用整体特征 h_spatial。
+    Differences from ODCrossAttention:
+    - No per-head modality Key subspaces;
+    - Key uses only fused multi-modal features; all heads share the same Key;
+    - Value still uses full h_spatial.
     """
 
     def __init__(
@@ -176,7 +179,7 @@ class ODCrossAttentionUnified(nn.Module):
         dropout: float = 0.0,
     ):
         super().__init__()
-        assert hidden_dim % n_heads == 0, "hidden_dim 必须能被 n_heads 整除"
+        assert hidden_dim % n_heads == 0, "hidden_dim must be divisible by n_heads"
         self.head_dim = hidden_dim // n_heads
         self.n_heads = n_heads
 

@@ -8,10 +8,10 @@ from model.nets.model_aug import UrbanModelAug
 
 class UrbanModelAugWithoutVis(UrbanModelAug):
     """
-    消融实验变体：W/o Vis（去除访客画像信息）。
+    Ablation variant: W/o Vis (removes visitor profile information).
 
-    实现方式：复用主模型结构，但强制在交互层禁用 vis 模态（use_vis=False）。
-    其余模块保持一致。
+    Implementation: reuse the main model architecture but force use_vis=False in the
+    interaction layer. All other modules remain unchanged.
     """
 
     def __init__(
@@ -48,4 +48,3 @@ class UrbanModelAugWithoutVis(UrbanModelAug):
             use_vis=False,
             use_street=use_street,
         )
-

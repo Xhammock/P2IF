@@ -6,7 +6,7 @@ import dgl.nn as dglnn
 
 class SpatialSAGE(nn.Module):
     """
-    简单的 GraphSAGE（mean 聚合），用于空间邻接图。
+    Simple GraphSAGE (mean aggregation) for the spatial adjacency graph.
     """
 
     def __init__(self, in_dim: int, hidden_dim: int, num_layers: int = 1, dropout: float = 0.0):
@@ -33,4 +33,3 @@ class SpatialSAGE(nn.Module):
             h = self.act(h)
             h = self.dropout(h)
         return h
-
