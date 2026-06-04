@@ -4,7 +4,7 @@
 
 To address limitations of prior place representations, this study proposes **P2IF**, a Transformer-based framework for urban place representation. P2IF models interactions between incoming populations and local place attributes through a **cross-attention** mechanism, in which the demographic composition of origin places serves as the **query** and multiple local feature embeddings serve as **keys** and **values**. **Mobility flows** are incorporated as **attention bias** terms to emphasize salient inter-place interactions. For robust and transferable representations, we use a **self-supervised** objective combining **dual-view augmentation** with **neighborhood-constrained contrastive learning**.
 
-This README follows a journal-style data and code sharing layout: **end-to-end data workflow**, **step-by-step reproduction** for reported tables, figures, and metrics (Sections 4–5), and notes on **off-the-shelf tools** where applicable. Reviewers should **not edit Python source files**; use **CLI arguments** and JSON configs only. Paths below are **relative to the repository root** unless stated otherwise.
+This README follows a journal-style data and code sharing layout: **end-to-end data workflow**, **step-by-step reproduction** for reported tables, figures, and metrics (Sections 4–5), and a companion [`REPRODUCIBILITY_GUIDE.md`](REPRODUCIBILITY_GUIDE.md) with item-by-item commands. Reviewers should **not edit Python source files**; use **CLI arguments** and JSON configs only. Paths below are **relative to the repository root** unless stated otherwise.
 
 ---
 
@@ -25,7 +25,8 @@ This README follows a journal-style data and code sharing layout: **end-to-end d
 │   └── nets/               # P2IF (UrbanModelAug), baselines, ablations
 ├── task/                   # Downstream evaluation, clustering, k selection, AIC
 ├── train_urban_unsup.py    # Main self-supervised training + embedding export
-└── README.md
+├── README.md
+└── REPRODUCIBILITY_GUIDE.md  # Item-by-item reproduction for Tables 2–3, Figures 2–6, Sections 4–5
 ```
 
 **Implementation mapping (high level)**
@@ -134,7 +135,7 @@ Training creates a **timestamped** directory:
 - `checkpoints/train_<YYYYMMDD_HHMMSS>/config.json` — frozen copy of the training config  
 - `checkpoints/train_<YYYYMMDD_HHMMSS>/urban_model_best.pt` — best weights  
 - `checkpoints/train_<YYYYMMDD_HHMMSS>/best_embeddings.npz` — node embeddings (`node_ids`, `h_spatial`, `h_od`, `z`, … depending on model)  
-- `checkpoints/train_<YYYYMMDD_HHMMSS>/loss_curve.csv` and `loss_curve.png` — for **training curves / diagnostics (figures in Section 4–5)**  
+- `checkpoints/train_<YYYYMMDD_HHMMSS>/loss_curve.csv` and `loss_curve.png` — **Figure 4** (training loss curve)
 
 Set a shell variable for later steps (no source-code edits):
 
@@ -146,39 +147,49 @@ export RUN_DIR=checkpoints/train_20260101_120000   # replace with the directory 
 
 ## 6. Reproducibility index: tables, figures, and metrics
 
-Map each **paper artifact** to the following steps. Replace `RUN_DIR` with your actual `checkpoints/train_*` folder from Section 5.2.
+This section maps each **paper artifact** to scripts and output files. Replace `RUN_DIR` with your actual `checkpoints/train_<YYYYMMDD_HHMMSS>/` folder from Section 5.2.
 
-> **Note for authors:** Before camera-ready, fill the “Paper reference” column with exact **table / figure / section** labels from your submission. The commands are stable; only `RUN_DIR` and optional hyperparameters in JSON need to match the paper.
+**Full step-by-step instructions** (data sources, exact commands, expected outputs, seed notes, and GIS steps) are in [`REPRODUCIBILITY_GUIDE.md`](REPRODUCIBILITY_GUIDE.md).
 
-| Paper reference | What is reproduced | Data / inputs | Command / script | Output |
-|-----------------|-------------------|---------------|------------------|--------|
-| **Table 2** (example: downstream regression) | RMSE / MAE / R² for house price | `best_embeddings.npz`, `data/house_price_aligned_grid.csv` | `python task/task_lightgbm.py --task house_price --embeddings ${RUN_DIR}/best_embeddings.npz --price_data data/house_price_aligned_grid.csv --embedding_key h --concat_keys h_spatial h_od` | `results/.../metrics`, predictions under `results/` |
-| **Table 3** (example: land use / vitality) | Accuracy / F1 / macro metrics | `best_embeddings.npz`, `data/landuse_aligned_grid.csv` or vitality CSV | `python task/task_lightgbm.py --task landuse --embeddings ${RUN_DIR}/best_embeddings.npz --landuse_data data/landuse_aligned_grid.csv` (or `--task vitality --vitality_data data/vitality_weekday_aggregated.csv`) | same as above |
-| **Table / metric: AIC** (example: compare downstream models) | In-sample AIC on regression tasks | `train_predictions.csv` (+ optional `lightgbm_model.txt`) from each `task_lightgbm.py` run | `python task/aic_from_predictions_csv.py --csv results/<checkpoint>/<task>_prediction/train_predictions.csv --k-from-lightgbm-trees results/<checkpoint>/<task>_prediction/lightgbm_model.txt --label "<model name>"` (see Section 6.2) | AIC printed to stdout; repeat per representation |
-| **Figure 2** (example: loss / training dynamics) | Training loss curve | Produced during training | Use `RUN_DIR/loss_curve.png` or replot `loss_curve.csv` | PNG / PDF for manuscript |
-| **Figure 3** (example: embedding 2D) | PCA / t-SNE / UMAP of `z` | `best_embeddings.npz` | `python task/cluster_embeddings.py --embeddings ${RUN_DIR}/best_embeddings.npz --embedding_key z --num_clusters <K> --output_dir ${RUN_DIR}/cluster_results --viz_methods pca tsne` | figures under `${RUN_DIR}/cluster_results/` |
-| **Figure 4** (example: optimal K) | Elbow / silhouette vs. k | `best_embeddings.npz` | `python task/find_optimal_k.py --embeddings ${RUN_DIR}/best_embeddings.npz --embedding_key z --k_min 2 --k_max 20 --output_dir ${RUN_DIR}/k_selection` | plots + CSV in `${RUN_DIR}/k_selection/` |
-| **Figure 5–6** (examples: spatial maps / case studies) | Choropleth or case maps | Embeddings + external GIS or plotting notebook | Export CSV from `cluster_embeddings.py` outputs (`node_id`, `cluster_id`) and join to shapefile in QGIS (**screenshots** in `docs/screenshots/`) or use in-house plotting scripts if added | Map figures |
+| Paper artifact | What is reproduced | Command / script | Expected output |
+|----------------|-------------------|------------------|-----------------|
+| **Table 2:** comparative results across downstream tasks | Test-set RMSE / MAE / R² (regression) and Accuracy / F1 (classification) for P2IF and baselines | Train each model (Section 6.1), then run `task/task_lightgbm.py` for all three tasks per checkpoint (see guide § Table 2) | `results/<checkpoint>/house_price_prediction/metrics.csv`, `results/<checkpoint>/vitality_prediction/metrics.csv`, `results/<checkpoint>/landuse_lgb/metrics.csv` |
+| **Table 3:** ablation results | Same downstream metrics for P2IF ablations | Train ablation configs (Section 6.1), then run the same downstream commands as Table 2 (see guide § Table 3) | Same `metrics.csv` paths under each ablation checkpoint |
+| **AIC** (model-comparison metric) | In-sample AIC on regression and classification tasks | `task/aic_from_predictions_csv.py` on `train_predictions.csv` from each downstream run (see Section 6.2) | AIC printed to stdout |
+| **Figure 2:** residential profile statistics | Summary statistics of resident-profile features (`res_0`–`res_27`) | Inspect `data/weekday/features.csv` (see guide § Figure 2) | Descriptive stats from released CSV |
+| **Figure 3:** downstream task data visualization | Distributions of house price, vitality, and land-use labels | Inspect `data/house_price_aligned_grid.csv`, `data/vitality_weekday_aggregated.csv`, `data/landuse_aligned_grid.csv` (see guide § Figure 3) | Label distributions from released CSVs |
+| **Figure 4:** training loss curve | Self-supervised training loss vs. epoch | Produced automatically by Section 5 training command | `${RUN_DIR}/loss_curve.png`, `${RUN_DIR}/loss_curve.csv` |
+| **Figure 5:** spatial clustering maps | Choropleth of cluster assignments on the study grid | `task/cluster_embeddings.py` → join `cluster_assignments.csv` to grid shapefile in QGIS (see guide § Figure 5) | `${RUN_DIR}/cluster_results/cluster_assignments.csv` + GIS map export |
+| **Figure 6:** t-SNE visualization | 2-D t-SNE of fused embeddings colored by cluster | `task/cluster_embeddings.py --viz_methods tsne` (see guide § Figure 6) | `${RUN_DIR}/cluster_results/clusters_tsne.png` |
 
-**Section 4 & 5 metrics (general)**
+**Sections 4–5 metrics (self-supervised training and downstream evaluation)**
 
-- **Self-supervised training:** metrics are primarily **training / validation loss components** logged in `loss_curve.csv` (and console).  
-- **Downstream:** `task/task_lightgbm.py` prints **RMSE, MAE, R²** (regression) or **accuracy, F1** (classification) to stdout and saves under `results/<checkpoint_name>/<task>/`.  
-- **MLP land-use (alternative head):**  
-
-  ```bash
-  python task/predict_landuse_mlp.py --embeddings ${RUN_DIR}/best_embeddings.npz --landuse_csv data/landuse_aligned_grid.csv --output_dir results/${RUN_DIR##*/}/landuse_mlp
-  ```
+- **Self-supervised training:** loss components logged in `${RUN_DIR}/loss_curve.csv` and printed each epoch.  
+- **Downstream:** `task/task_lightgbm.py` prints **RMSE, MAE, R²** (regression) or **accuracy, F1** (classification) to stdout and saves **`metrics.csv`**, **`train_predictions.csv`**, **`test_predictions.csv`**, and **`lightgbm_model.txt`** under `results/<checkpoint_name>/<task>/`.
 
 ### 6.1 Baselines and ablations
 
-Train with other JSON files under `config/` (e.g. `model_Region2Vec.json`, `model_GAT.json`, `model_without_cl.json`, `model_without_interaction.json`, …). **Do not edit** `train_urban_unsup.py`; only change `--config`:
+Train with JSON configs under `config/`. **Do not edit** Python source; only change `--config`:
+
+| Config file | Model |
+|-------------|-------|
+| `config/model_aug.json` | P2IF (full model) |
+| `config/model_Region2Vec.json` | Region2Vec baseline |
+| `config/model_GAT.json` | GAT baseline |
+| `config/model_HREP.json` | HREP baseline |
+| `config/model_ReMVC.json` | ReMVC baseline |
+| `config/model_without_cl.json` | Ablation: w/o contrastive learning |
+| `config/model_without_interaction.json` | Ablation: w/o cross-modal interaction |
+| `config/model_without_vis.json` | Ablation: w/o visitor profile |
+| `config/model_without_res.json` | Ablation: w/o resident subspace query |
 
 ```bash
+python train_urban_unsup.py --config config/model_aug.json --gpu 0
 python train_urban_unsup.py --config config/model_Region2Vec.json --gpu 0
+# ... repeat for each row above
 ```
 
-Each run produces its own `RUN_DIR`; point downstream commands to the matching `best_embeddings.npz`.
+Each run creates its own `RUN_DIR`; point downstream commands to the matching `best_embeddings.npz`. See [`REPRODUCIBILITY_GUIDE.md`](REPRODUCIBILITY_GUIDE.md) for the full Table 2 / Table 3 command sequences.
 
 ### 6.2 Model comparison via AIC (Akaike Information Criterion)
 
@@ -198,8 +209,8 @@ where \(n\) is the sample size, \(\mathrm{RSS} = \sum_i (y_i - \hat{y}_i)^2\) is
 |------|-------------|
 | Input CSV | Must contain **`y_true`** and **`y_pred`** columns (defaults; override with `--y-true-col` / `--y-pred-col` if needed). |
 | Which predictions | Use **`train_predictions.csv`** — predictions on the **training split used to fit the downstream model** (in-sample AIC). Do **not** substitute `test_predictions.csv` unless you deliberately report a different analysis and interpret it accordingly. |
-| Regression tasks only | AIC here applies to **house price** and **vitality** runs from `task_lightgbm.py`. Classification tasks are out of scope for this script. |
-| Where files live | After a downstream run, outputs are under `results/<checkpoint_name>/<task>/`, e.g. `results/train_20260101_120000/vitality_prediction/train_predictions.csv` and `lightgbm_model.txt`. |
+| Which tasks | AIC applies to all `task_lightgbm.py` downstream runs: regression (**house price**, **vitality**) and classification (**land use**). |
+| Where files live | After a downstream run, outputs are under `results/<checkpoint_name>/<task>/`, e.g. `results/train_20260101_120000/vitality_prediction/train_predictions.csv` (regression) or `results/train_20260101_120000/landuse_lgb/train_predictions.csv` (classification), plus `lightgbm_model.txt`. |
 
 **Choosing \(k\)**
 
@@ -211,7 +222,9 @@ where \(n\) is the sample size, \(\mathrm{RSS} = \sum_i (y_i - \hat{y}_i)^2\) is
 **Workflow: compare AIC across representation models**
 
 1. Train each representation (Section 5 / Section 6.1) and note its `RUN_DIR`.
-2. For each representation, run the **same downstream task** (same `--task`, splits, and LightGBM settings), e.g. vitality regression:
+2. For each representation, run the **same downstream task** (same `--task`, splits, and LightGBM settings). Use these commands (set `RUN_DIR` first):
+
+   **Vitality regression:**
 
    ```bash
    python task/task_lightgbm.py \
@@ -222,17 +235,37 @@ where \(n\) is the sample size, \(\mathrm{RSS} = \sum_i (y_i - \hat{y}_i)^2\) is
      --concat_keys h_spatial h_od
    ```
 
-   Repeat with `${RUN_DIR}` pointing to P2IF and each baseline checkpoint. Each run writes `train_predictions.csv` and `lightgbm_model.txt` under `results/<checkpoint_name>/vitality_prediction/` (or `house_price_prediction/`).
+   **Land use classification:**
+
+   ```bash
+   python task/task_lightgbm.py \
+     --task landuse \
+     --embeddings ${RUN_DIR}/best_embeddings.npz \
+     --landuse_data data/landuse_aligned_grid.csv \
+     --embedding_key h \
+     --concat_keys h_spatial h_od
+   ```
+
+   Repeat with `${RUN_DIR}` pointing to P2IF and each baseline checkpoint. Each run writes `train_predictions.csv` and `lightgbm_model.txt` under `results/<checkpoint_name>/vitality_prediction/`, `house_price_prediction/`, or `landuse_lgb/` depending on `--task`.
 
 3. Compute AIC per run with `task/aic_from_predictions_csv.py`:
 
-   **LightGBM — tree-count heuristic for \(k\):**
+   **LightGBM — tree-count heuristic for \(k\)** (vitality example; for land use, swap paths to `landuse_lgb/`):
 
    ```bash
    python task/aic_from_predictions_csv.py \
      --csv results/train_20260101_120000/vitality_prediction/train_predictions.csv \
      --k-from-lightgbm-trees results/train_20260101_120000/vitality_prediction/lightgbm_model.txt \
      --label "P2IF + LightGBM"
+   ```
+
+   **Land use classification** (same script; classification CSVs also provide numeric `y_true` / `y_pred`):
+
+   ```bash
+   python task/aic_from_predictions_csv.py \
+     --csv results/train_20260101_120000/landuse_lgb/train_predictions.csv \
+     --k-from-lightgbm-trees results/train_20260101_120000/landuse_lgb/lightgbm_model.txt \
+     --label "P2IF + LightGBM (land use)"
    ```
 
    **User-specified \(k\) (e.g. linear baseline or a fixed reporting rule):**
